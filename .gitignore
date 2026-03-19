@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+
+# Migration artifacts
+logs/
+*.log
+progress.db
+converted_mysql_ddl.sql
+
+# Source data (too large or sensitive)
+origin_test_data_csvfiles/
+origin_test_database_DDL.sql
+origin_database_info.txt
+
+# Build artifacts
+dist/
+
+# Claude
+.claude/

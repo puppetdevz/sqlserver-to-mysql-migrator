@@ -34,3 +34,6 @@ dist/
 
 # Claude
 .claude/
+
+# Extra large files in parent
+db-migration.zip

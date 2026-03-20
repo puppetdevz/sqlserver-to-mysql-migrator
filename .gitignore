@@ -37,3 +37,6 @@ dist/
 
 # Extra large files in parent
 db-migration.zip
+
+install-files/
+install-files.zip

@@ -81,6 +81,71 @@ func (ti *TableImporter) Import() (*ImportResult, error) {
 	return result, err
 }
 
+// getDBColumns 获取数据库中表的列
+func (ti *TableImporter) getDBColumns(tableName string) ([]string, error) {
+	// 使用 DESCRIBE 获取列信息
+	query := fmt.Sprintf("DESCRIBE `%s`", tableName)
+	rows, err := ti.conn.DB.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var field, colType, null, key, extra string
+		var defaultVal *string
+		if err := rows.Scan(&field, &colType, &null, &key, &defaultVal, &extra); err != nil {
+			return nil, err
+		}
+		columns = append(columns, field)
+	}
+	return columns, rows.Err()
+}
+
+// buildColumnMapping 构建 CSV 列索引到有效列索引的映射
+// csvColIdx: CSV 列索引 -> -1 表示跳过该列
+func buildColumnMapping(csvHeaders []string, dbColumns []string) []int {
+	// 构建 DB 列映射（大写 -> 索引）
+	dbColMap := make(map[string]int)
+	for i, col := range dbColumns {
+		dbColMap[strings.ToUpper(col)] = i
+	}
+
+	// 构建 CSV 列索引映射
+	mapping := make([]int, len(csvHeaders))
+	for i, csvCol := range csvHeaders {
+		if _, ok := dbColMap[strings.ToUpper(csvCol)]; ok {
+			mapping[i] = dbColMap[strings.ToUpper(csvCol)]
+		} else {
+			mapping[i] = -1 // 跳过
+		}
+	}
+	return mapping
+}
+
+// filterRowData 根据映射过滤行数据，只保留有效的列
+func filterRowData(row []string, mapping []int) []interface{} {
+	result := make([]interface{}, 0, len(mapping))
+	for i, val := range row {
+		if mapping[i] >= 0 {
+			result = append(result, val)
+		}
+	}
+	return result
+}
+
+// filterRowDataByInterface 过滤已预处理的数据（interface{} 数组）
+func filterRowDataByInterface(row []interface{}, mapping []int) []interface{} {
+	result := make([]interface{}, 0, len(mapping))
+	for i, val := range row {
+		if mapping[i] >= 0 {
+			result = append(result, val)
+		}
+	}
+	return result
+}
+
 // pipelinedImport 流水线导入：边读边写
 func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) (*ImportResult, error) {
 	reader := csv.NewReader(file)
@@ -99,15 +164,36 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		headers[i] = strings.TrimPrefix(headers[i], "\ufeff")
 	}
 
-	// 创建批量插入器（带预编译优化）
-	inserter := NewBatchInserter(
+	// 获取数据库中实际的列
+	dbColumns, err := ti.getDBColumns(actualTableName)
+	if err != nil {
+		logger.Warnf("Failed to get DB columns for %s: %v", actualTableName, err)
+		// 回退到使用 CSV 列
+		dbColumns = headers
+	}
+
+	// 创建批量插入器（使用数据库列过滤 CSV 列）
+	inserter, skippedCols := NewBatchInserterWithDBColumns(
 		ti.conn.DB,
 		actualTableName,
 		headers,
+		dbColumns,
 		ti.cfg.Migration.BatchSize,
 		ti.cfg.Migration.OnDuplicate,
 	)
+	if inserter == nil {
+		return nil, fmt.Errorf("no valid columns to insert for table %s", actualTableName)
+	}
 	defer inserter.Close()
+
+	// 记录跳过的列
+	if len(skippedCols) > 0 {
+		logger.Warnf("Table %s: skipped %d columns not in DB (%s)",
+			ti.tableName, len(skippedCols), strings.Join(skippedCols, ", "))
+	}
+
+	// 构建 CSV 列索引到有效列的映射（用于筛选数据）
+	mapping := buildColumnMapping(headers, dbColumns)
 
 	// 建立流水线：CSV读取 -> 预处理 -> 数据库插入
 	type batchData struct {
@@ -150,10 +236,13 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 				return
 			}
 
-			// 预处理数据（转换类型）
+			// 预处理数据（转换类型，并过滤掉无效列）
 			processedBatch := make([][]interface{}, len(batch))
 			for i, row := range batch {
-				processedBatch[i] = PreprocessRow(row)
+				// 先类型转换，再过滤
+				processedRow := PreprocessRow(row)
+				filteredRow := filterRowDataByInterface(processedRow, mapping)
+				processedBatch[i] = filteredRow
 			}
 
 			batchNum++
@@ -269,7 +358,7 @@ func NewErrorRecorder(logDir string) (*ErrorRecorder, error) {
 			logger.Warnf("Failed to create error log dir: %v", err)
 		} else {
 			f, err := os.OpenFile(
-				filepath.Join(logDir, "migration_errors.log"),
+				filepath.Join(logDir, "migration.log"),
 				os.O_APPEND|os.O_CREATE|os.O_WRONLY,
 				0644,
 			)

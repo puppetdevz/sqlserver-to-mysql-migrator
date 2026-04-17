@@ -37,6 +37,9 @@ func NewConnection(cfg *config.TargetConfig) (*Connection, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// 禁用 innodb_strict_mode 以支持超宽表（允许 ROW_FORMAT=COMPRESSED 下超出行大小限制的表）
+	db.Exec("SET SESSION innodb_strict_mode = OFF")
+
 	logger.Infof("Database connected: %s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
 
 	return &Connection{DB: db}, nil

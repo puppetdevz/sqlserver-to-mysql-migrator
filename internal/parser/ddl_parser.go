@@ -217,6 +217,11 @@ func (p *DDLParser) parseColumn(line string) *ColumnDef {
 	// 移除尾部逗号
 	line = strings.TrimSuffix(strings.TrimSpace(line), ",")
 
+	// 跳过 CONSTRAINT 行（非主键的 UNIQUE、FOREIGN KEY 等约束）
+	if strings.Contains(strings.ToUpper(line), "CONSTRAINT") && !strings.Contains(strings.ToUpper(line), "PRIMARY KEY") {
+		return nil
+	}
+
 	// 分割列名和类型
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
@@ -228,6 +233,11 @@ func (p *DDLParser) parseColumn(line string) *ColumnDef {
 	// 提取类型（可能包含括号和参数）
 	typeStart := len(columnName) + 1
 	typePart := strings.TrimSpace(line[typeStart:])
+
+	// 移除 DEFAULT 值部分（如 "datetime DEFAULT '1753-01-01 00:00:00' NOT NULL" -> "datetime NOT NULL"）
+	// 只移除 DEFAULT 及其值，不影响 NOT NULL/NULL 标记
+	typePart = regexp.MustCompile(`\s+DEFAULT\s+'[^']*'`).ReplaceAllString(typePart, "")
+	typePart = regexp.MustCompile(`\s+DEFAULT\s+\S+`).ReplaceAllString(typePart, "")
 
 	// 检查是否 nullable
 	nullable := !strings.Contains(strings.ToUpper(line), "NOT NULL")

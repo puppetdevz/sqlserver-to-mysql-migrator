@@ -7,16 +7,20 @@ import (
 	"sync"
 )
 
+// maxPreparedPlaceholders MySQL prepared statement 占位符上限（留有余量）
+const maxPreparedPlaceholders = 60000
+
 // BatchInserter 批量插入器
 type BatchInserter struct {
 	db           *sql.DB
 	tableName    string
-	columns      []string
+	columns      []string // 只包含数据库中存在的列
 	batchSize    int
 	onDuplicate  string // "replace" or "ignore"
 	stmt         *sql.Stmt
 	stmtMu       sync.RWMutex
 	buildQueryMu sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
+	skippedCols  []string   // 跳过的列
 }
 
 // NewBatchInserter 创建批量插入器
@@ -30,51 +34,130 @@ func NewBatchInserter(db *sql.DB, tableName string, columns []string, batchSize 
 	}
 }
 
-// getStmt 获取预编译语句（延迟初始化）
-func (bi *BatchInserter) getStmt(query string) (*sql.Stmt, error) {
-	bi.stmtMu.RLock()
-	if bi.stmt != nil {
-		bi.stmtMu.RUnlock()
-		return bi.stmt, nil
-	}
-	bi.stmtMu.RUnlock()
-
-	bi.stmtMu.Lock()
-	defer bi.stmtMu.Unlock()
-	if bi.stmt != nil {
-		return bi.stmt, nil
-	}
-
-	stmt, err := bi.db.Prepare(query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	bi.stmt = stmt
-	return stmt, nil
+// GetSkippedColumns 获取跳过的列列表
+func (bi *BatchInserter) GetSkippedColumns() []string {
+	return bi.skippedCols
 }
 
-// InsertBatch 批量插入数据
+// NewBatchInserterWithDBColumns 创建批量插入器（使用数据库列过滤 CSV 列）
+// csvColumns: CSV 文件中的列
+// dbColumns: 数据库中实际存在的列
+// tableImporter: 用于记录跳过的列
+func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []string, dbColumns []string, batchSize int, onDuplicate string) (*BatchInserter, []string) {
+	// 构建数据库列映射（大写 -> 原名）
+	dbColMap := make(map[string]string)
+	for _, col := range dbColumns {
+		dbColMap[strings.ToUpper(col)] = col
+	}
+
+	// 只保留数据库中存在的列
+	var validColumns []string
+	var skippedColumns []string
+	for _, csvCol := range csvColumns {
+		upperCol := strings.ToUpper(csvCol)
+		if dbOrig, ok := dbColMap[upperCol]; ok {
+			validColumns = append(validColumns, dbOrig) // 使用数据库中的原始列名
+		} else {
+			skippedColumns = append(skippedColumns, csvCol)
+		}
+	}
+
+	if len(validColumns) == 0 {
+		return nil, skippedColumns
+	}
+
+	return &BatchInserter{
+		db:           db,
+		tableName:    tableName,
+		columns:     validColumns,
+		batchSize:   batchSize,
+		onDuplicate:  onDuplicate,
+		skippedCols:  skippedColumns,
+	}, skippedColumns
+}
+
+// getStmt 获取预编译语句
+// canCache: 是否使用缓存（拆分批次不缓存，避免占位符数量不匹配）
+func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, error) {
+	if canCache {
+		bi.stmtMu.RLock()
+		if bi.stmt != nil {
+			bi.stmtMu.RUnlock()
+			return bi.stmt, false, nil
+		}
+		bi.stmtMu.RUnlock()
+
+		bi.stmtMu.Lock()
+		defer bi.stmtMu.Unlock()
+		if bi.stmt != nil {
+			return bi.stmt, false, nil
+		}
+
+		stmt, err := bi.db.Prepare(query)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		bi.stmt = stmt
+		return stmt, false, nil
+	}
+
+	// 不使用缓存，每次重新 Prepare
+	stmt, err := bi.db.Prepare(query)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	return stmt, true, nil
+}
+
+// InsertBatch 批量插入数据（超宽表自动拆分）
 func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
 
-	// 构建 SQL 语句
-	query := bi.buildInsertQuery(len(rows))
+	// 根据列数计算每批最大行数，避免超出 MySQL prepared statement 占位符限制
+	maxRowsPerBatch := maxPreparedPlaceholders / len(bi.columns)
+	if maxRowsPerBatch < 1 {
+		maxRowsPerBatch = 1
+	}
 
-	// 使用预编译语句
-	stmt, err := bi.getStmt(query)
+	if len(rows) <= maxRowsPerBatch {
+		return bi.insertBatchSingle(rows, true) // 单批次，可缓存
+	}
+
+	// 拆分为多个小批次（各批次行数可能不同，不缓存以避免占位符数量不匹配）
+	var totalAffected int64
+	for i := 0; i < len(rows); i += maxRowsPerBatch {
+		end := i + maxRowsPerBatch
+		if end > len(rows) {
+			end = len(rows)
+		}
+		affected, err := bi.insertBatchSingle(rows[i:end], false) // 拆分的批次，不缓存
+		if err != nil {
+			return totalAffected, err
+		}
+		totalAffected += affected
+	}
+	return totalAffected, nil
+}
+
+// insertBatchSingle 执行单次插入
+// canCache: 是否允许缓存预编译语句（拆分批次不允许，避免占位符数量不一致）
+func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) (int64, error) {
+	query := bi.buildInsertQuery(len(rows))
+	stmt, needsClose, err := bi.getStmt(query, canCache)
 	if err != nil {
 		return 0, err
 	}
+	if needsClose {
+		defer stmt.Close()
+	}
 
-	// 展平数据
 	var args []interface{}
 	for _, row := range rows {
 		args = append(args, row...)
 	}
 
-	// 执行插入
 	result, err := stmt.Exec(args...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute batch insert: %w", err)

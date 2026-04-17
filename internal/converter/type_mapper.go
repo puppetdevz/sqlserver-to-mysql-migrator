@@ -3,7 +3,6 @@ package converter
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -37,38 +36,29 @@ func (tm *TypeMapper) MapType(sqlServerType string) (string, error) {
 	// 移除空格并转为小写
 	sqlServerType = strings.TrimSpace(strings.ToLower(sqlServerType))
 
-	// nvarchar(n) -> varchar(n)
+	// nvarchar(n) -> text（避免行大小超限）
 	if strings.HasPrefix(sqlServerType, "nvarchar") {
 		re := regexp.MustCompile(`nvarchar\((\d+|max)\)`)
 		if re.MatchString(sqlServerType) {
 			size := re.FindStringSubmatch(sqlServerType)[1]
 			if size == "max" {
-				// nvarchar(MAX) 转为 longtext，不计入行大小限制
 				return "longtext", nil
 			}
-			// nvarchar(n) 如果 n >= 1000，转为 text 以避免行大小超限
-			// (utf8mb4 编码下 varchar(1000) = 4000+ 字节，多列即超限)
-			if sizeVal, err := strconv.Atoi(size); err == nil && sizeVal >= 1000 {
-				return "text", nil
-			}
-			return fmt.Sprintf("varchar(%s)", size), nil
+			// utf8mb4: varchar(100)=402字节，177列即超 65535 限制；表单字段用 TEXT 更合适
+			return "text", nil
 		}
 	}
 
-	// varchar(n) -> varchar(n)
+	// varchar(n) -> text（避免行大小超限）
 	if strings.HasPrefix(sqlServerType, "varchar") {
 		re := regexp.MustCompile(`varchar\((\d+|max)\)`)
 		if re.MatchString(sqlServerType) {
 			size := re.FindStringSubmatch(sqlServerType)[1]
 			if size == "max" {
-				// varchar(MAX) 转为 longtext，不计入行大小限制
 				return "longtext", nil
 			}
-			// varchar(n) 如果 n >= 1000，转为 text 以避免行大小超限
-			if sizeVal, err := strconv.Atoi(size); err == nil && sizeVal >= 1000 {
-				return "text", nil
-			}
-			return fmt.Sprintf("varchar(%s)", size), nil
+			// utf8mb4: varchar(100)=402字节，177列即超 65535 限制；表单字段用 TEXT 更合适
+			return "text", nil
 		}
 	}
 
@@ -148,9 +138,15 @@ func (tm *TypeMapper) MapType(sqlServerType string) (string, error) {
 	return "", fmt.Errorf("unsupported SQL Server type: %s", sqlServerType)
 }
 
-// CleanCollation 移除 COLLATE 子句
+// CleanCollation 移除 COLLATE 子句和 DEFAULT 值
 func (tm *TypeMapper) CleanCollation(columnDef string) string {
 	// 移除 COLLATE Chinese_PRC_90_CI_AI 等
 	re := regexp.MustCompile(`\s+COLLATE\s+\w+`)
-	return re.ReplaceAllString(columnDef, "")
+	columnDef = re.ReplaceAllString(columnDef, "")
+
+	// 移除 DEFAULT 值（如 DEFAULT 0, DEFAULT 1）
+	re = regexp.MustCompile(`\s+DEFAULT\s+\S+`)
+	columnDef = re.ReplaceAllString(columnDef, "")
+
+	return columnDef
 }

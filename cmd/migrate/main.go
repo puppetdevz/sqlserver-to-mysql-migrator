@@ -574,7 +574,7 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 		logger.Warnf("  - %s: %d occurrences", errType, count)
 	}
 
-	logger.Warn("See migration_errors.log for detailed error information")
+	logger.Warn("See migration.log for detailed error information")
 }
 
 // findCSVFile 查找 CSV 文件

@@ -29,24 +29,6 @@
 logs/
 *.log
 
-# Source data (too large for version control)
-/origin_data_csvfiles/
-/origin_database_ddl_test.sql
-/target_database_ddl.sql
-/target_database_info.txt
-data/
-
-# Documentation (user generated)
-/QUICKSTART.md
-
-# Claude
-# 排除 skills 目录
-!.claude/skills/
-.claude/
-
-# Temporary files
-test_ddl_parser.go
-
 # Harness (runtime state)
 harness-*.json
 harness-*.txt

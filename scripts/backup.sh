@@ -134,17 +134,19 @@ do_backup() {
     local start_time=$(date +%s)
 
     # 执行备份（使用环境变量传递密码，避免命令行暴露）
+    # 使用子 shell 捕获退出码
+    set +e  # 临时关闭 -e，避免管道失败导致脚本退出
     export MYSQL_PWD="$DB_PASS"
-    mysqldump --host="$DB_HOST" \
-              --port="$DB_PORT" \
-              --user="$DB_USER" \
-              --single-transaction \
-              --quick \
-              --set-gtid-purged=OFF \
-              --databases "$DB_NAME" \
-              > "$backup_file" 2>&1
+    { mysqldump --host="$DB_HOST" \
+                --port="$DB_PORT" \
+                --user="$DB_USER" \
+                --single-transaction \
+                --quick \
+                --set-gtid-purged=OFF \
+                --databases "$DB_NAME"; } > "$backup_file" 2>&1
     local dump_status=$?
     unset MYSQL_PWD
+    set -e  # 重新开启 -e
 
     if [[ $dump_status -ne 0 ]]; then
         rm -f "$backup_file"

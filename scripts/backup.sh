@@ -1,139 +1,167 @@
 #!/bin/bash
-# 数据库备份脚本
-# 用法: ./backup.sh [--config /path/to/config.yaml]
+#
+# backup.sh
+# 备份目标 MySQL 数据库完整状态
+#
+# 用法:
+#   ./scripts/backup.sh                  # 使用默认 config.yaml
+#   ./scripts/backup.sh --config /path    # 指定配置文件
+#
+set -euo pipefail
 
-set -e
-
+# ========== 配置 ==========
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
+CONFIG_FILE="$SCRIPT_DIR/config.yaml"
+BACKUP_DIR="$SCRIPT_DIR/../data"
 
-# 解析命令行参数
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --config)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --help|-h)
-            echo "用法: $0 [--config /path/to/config.yaml]"
-            echo ""
-            echo "参数:"
-            echo "  --config /path/to/config.yaml  指定配置文件路径（默认: scripts/config.yaml）"
-            echo "  --help, -h                     显示此帮助信息"
-            exit 0
+# ========== 颜色输出 ==========
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo_step() { echo -e "${GREEN}[Backup]${NC} $1"; }
+echo_info() { echo -e "${BLUE}[Info]${NC} $1"; }
+echo_warn() { echo -e "${YELLOW}[Warn]${NC} $1"; }
+echo_error() { echo -e "${RED}[Error]${NC} $1" >&2; }
+
+# ========== 错误处理 ==========
+die() {
+    echo_error "$1"
+    exit 1
+}
+
+# ========== 参数解析 ==========
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --config)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            --help|-h)
+                cat << EOF
+用法: $0 [--config /path/to/config.yaml]
+
+  --config    指定配置文件（默认: scripts/config.yaml）
+  --help, -h  显示帮助信息
+EOF
+                exit 0
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+}
+
+# ========== 配置解析 ==========
+# config.yaml 使用嵌套结构（target.host, target.port 等）
+parse_yaml_value() {
+    local key="$1"
+    case "$key" in
+        host|port|database|user|password)
+            # 提取 target.* 字段，在 target: 缩进下查找对应 key
+            awk -v k="$key" '
+                /^target:/ { in_target=1; target_indent=length($0) - length($0##[[:space:]]); next }
+                in_target && /^[^[:space:]]/ { in_target=0 }
+                in_target && /^[[:space:]]/ {
+                    cur_indent=length($0) - length($0##[[:space:]])
+                    if (cur_indent > target_indent && $0 ~ "^[[:space:]]*" k ":") {
+                        sub(/^[[:space:]]*[^:]*:[[:space:]]*/, "")
+                        gsub(/^[ \t]+|[ \t]+$/, "")
+                        gsub(/^["'\'']|["'\'']$/g, "")
+                        print
+                        exit
+                    }
+                }
+            ' "$CONFIG_FILE"
             ;;
         *)
-            echo -e "\033[31m错误: 未知参数 '$1'\033[0m"
-            echo "使用 --help 查看帮助信息"
-            exit 1
+            grep "^[[:space:]]*${key}:" "$CONFIG_FILE" | sed 's/.*:[[:space:]]*//' | tr -d '"' | tr -d "'"
             ;;
     esac
-done
+}
 
-# 颜色定义
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
+# ========== 前置检查 ==========
+check_prerequisites() {
+    # 检查配置文件
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        die "配置文件不存在: $CONFIG_FILE"
+    fi
 
-# 打印带颜色的消息
-print_step() { echo -e "${GREEN}[步骤]${NC} $1"; }
-print_info() { echo -e "${BLUE}[信息]${NC} $1"; }
-print_error() { echo -e "${RED}[错误]${NC} $1"; }
+    # 检查 mysqldump
+    if ! command -v mysqldump &> /dev/null; then
+        die "未找到 mysqldump 命令，请确保 MySQL 客户端已安装"
+    fi
 
-# 检查 mysqldump 命令
-print_step "检查 mysqldump 命令..."
-if ! command -v mysqldump &> /dev/null; then
-    print_error "mysqldump 命令未找到，请安装 MySQL 客户端"
-    exit 1
-fi
-print_info "mysqldump 已安装"
+    # 解析配置
+    local DB_HOST DB_PORT DB_NAME DB_USER DB_PASS
+    DB_HOST=$(parse_yaml_value "host")
+    DB_PORT=$(parse_yaml_value "port")
+    DB_NAME=$(parse_yaml_value "database")
+    DB_USER=$(parse_yaml_value "user")
+    DB_PASS=$(parse_yaml_value "password")
 
-# 检查配置文件
-print_step "检查配置文件..."
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    print_error "配置文件不存在: $CONFIG_FILE"
-    exit 1
-fi
-print_info "配置文件: $CONFIG_FILE"
+    # 检查必要字段
+    local missing_fields=()
+    [[ -z "$DB_HOST" ]] && missing_fields+=("target.host")
+    [[ -z "$DB_PORT" ]] && missing_fields+=("target.port")
+    [[ -z "$DB_NAME" ]] && missing_fields+=("target.database")
+    [[ -z "$DB_USER" ]] && missing_fields+=("target.user")
+    [[ -z "$DB_PASS" ]] && missing_fields+=("target.password")
+    if [[ ${#missing_fields[@]} -gt 0 ]]; then
+        die "配置字段缺失: ${missing_fields[*]}"
+    fi
+}
 
-# 使用 awk 解析嵌套 YAML 配置
-print_step "解析配置文件..."
+# ========== 备份函数 ==========
+do_backup() {
+    local timestamp
+    timestamp=$(date +"%Y%m%d%H%M")  # 格式: YYYYMMDDHHMM（12位，精确到分钟）
+    local backup_file="$BACKUP_DIR/target_database_$timestamp.sql"
 
-DB_HOST=$(awk '/^target:/ {found=1; next} found && /^  host:/ {gsub(/^  host: */, ""); gsub(/"/, ""); print; exit}' "$CONFIG_FILE")
-DB_PORT=$(awk '/^target:/ {found=1; next} found && /^  port:/ {gsub(/^  port: */, ""); print; exit}' "$CONFIG_FILE")
-DB_NAME=$(awk '/^target:/ {found=1; next} found && /^  database:/ {gsub(/^  database: */, ""); gsub(/"/, ""); print; exit}' "$CONFIG_FILE")
-DB_USER=$(awk '/^target:/ {found=1; next} found && /^  user:/ {gsub(/^  user: */, ""); gsub(/"/, ""); print; exit}' "$CONFIG_FILE")
-DB_PASS=$(awk '/^target:/ {found=1; next} found && /^  password:/ {gsub(/^  password: */, ""); gsub(/"/, ""); print; exit}' "$CONFIG_FILE")
+    # 检查备份文件是否已存在
+    if [[ -f "$backup_file" ]]; then
+        die "备份文件已存在: $backup_file"
+    fi
 
-# 验证必需字段
-print_step "验证配置字段..."
-MISSING_FIELDS=""
+    # 确保目录存在
+    mkdir -p "$BACKUP_DIR"
 
-if [[ -z "$DB_HOST" ]]; then
-    MISSING_FIELDS="${MISSING_FIELDS}host "
-fi
-if [[ -z "$DB_PORT" ]]; then
-    MISSING_FIELDS="${MISSING_FIELDS}port "
-fi
-if [[ -z "$DB_NAME" ]]; then
-    MISSING_FIELDS="${MISSING_FIELDS}database "
-fi
-if [[ -z "$DB_USER" ]]; then
-    MISSING_FIELDS="${MISSING_FIELDS}user "
-fi
-if [[ -z "$DB_PASS" ]]; then
-    MISSING_FIELDS="${MISSING_FIELDS}password "
-fi
+    echo_step "开始备份数据库 $DB_NAME 到 $backup_file"
+    local start_time=$(date +%s)
 
-if [[ -n "$MISSING_FIELDS" ]]; then
-    print_error "配置缺少必需字段: ${MISSING_FIELDS}"
-    exit 1
-fi
+    # 执行备份
+    mysqldump --host="$DB_HOST" \
+              --port="$DB_PORT" \
+              --user="$DB_USER" \
+              --password="$DB_PASS" \
+              --single-transaction \
+              --quick \
+              --set-gtid-purged=OFF \
+              --databases "$DB_NAME" \
+              > "$backup_file" 2>&1
 
-print_info "数据库: ${DB_NAME}@${DB_HOST}:${DB_PORT}"
+    if [[ $? -ne 0 ]]; then
+        rm -f "$backup_file"
+        die "备份失败，请检查数据库连接和权限"
+    fi
 
-# 生成时间戳 (YYYYMMDDHHMM)
-print_step "生成备份文件名..."
-TIMESTAMP=$(date +%Y%m%d%H%M)
-BACKUP_FILE="data/${DB_NAME}_${TIMESTAMP}.sql"
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    local size=$(du -h "$backup_file" | cut -f1)
 
-# 检查备份文件是否存在
-print_step "检查备份文件..."
-if [[ -f "$BACKUP_FILE" ]]; then
-    print_error "备份文件已存在，不允许覆盖: $BACKUP_FILE"
-    exit 1
-fi
+    echo_step "备份完成，耗时 ${duration}s，文件大小 $size"
+    echo_info "备份文件: $backup_file"
+}
 
-# 确保 data 目录存在
-mkdir -p data
+# ========== 主流程 ==========
+main() {
+    parse_args "$@"
+    check_prerequisites
+    do_backup
+}
 
-# 执行备份
-print_step "开始备份数据库..."
-print_info "输出文件: $BACKUP_FILE"
-print_info "使用参数: --single-transaction --quick --set-gtid-purged=OFF"
-
-# 设置密码环境变量（避免密码在命令行中暴露）
-export MYSQL_PWD="$DB_PASS"
-
-if ! mysqldump --single-transaction --quick --set-gtid-purged=OFF \
-    -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" \
-    --databases "$DB_NAME" > "$BACKUP_FILE" 2>&1; then
-    print_error "备份失败，正在清理临时文件..."
-    rm -f "$BACKUP_FILE"
-    unset MYSQL_PWD
-    exit 1
-fi
-
-unset MYSQL_PWD
-
-# 验证备份文件
-if [[ ! -s "$BACKUP_FILE" ]]; then
-    print_error "备份文件为空，备份失败"
-    rm -f "$BACKUP_FILE"
-    exit 1
-fi
-
-FILE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-print_step "备份完成!"
-print_info "文件: $BACKUP_FILE (${FILE_SIZE})"
+main

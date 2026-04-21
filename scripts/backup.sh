@@ -133,18 +133,18 @@ do_backup() {
     echo_step "开始备份数据库 $DB_NAME 到 $backup_file"
     local start_time=$(date +%s)
 
-    # 执行备份（使用子进程保存退出码）
-    {
-        mysqldump --host="$DB_HOST" \
-                  --port="$DB_PORT" \
-                  --user="$DB_USER" \
-                  --password="$DB_PASS" \
-                  --single-transaction \
-                  --quick \
-                  --set-gtid-purged=OFF \
-                  --databases "$DB_NAME"
-    } > "$backup_file" 2>&1
+    # 执行备份（使用环境变量传递密码，避免命令行暴露）
+    export MYSQL_PWD="$DB_PASS"
+    mysqldump --host="$DB_HOST" \
+              --port="$DB_PORT" \
+              --user="$DB_USER" \
+              --single-transaction \
+              --quick \
+              --set-gtid-purged=OFF \
+              --databases "$DB_NAME" \
+              > "$backup_file" 2>&1
     local dump_status=$?
+    unset MYSQL_PWD
 
     if [[ $dump_status -ne 0 ]]; then
         rm -f "$backup_file"

@@ -192,16 +192,16 @@ do_restore() {
     local start_time=$(date +%s)
 
     # 使用环境变量传递密码，避免命令行暴露
+    # 使用子 shell 捕获退出码
     set +e  # 临时关闭 -e，避免管道失败导致脚本退出
     export MYSQL_PWD="$DB_PASS"
 
-    # 恢复数据库（读取 SQL 文件并执行）
-    mysql --host="$DB_HOST" \
-          --port="$DB_PORT" \
-          --user="$DB_USER" \
-          --database="$DB_NAME" \
-          --default-character-set=utf8mb4 \
-          < "$BACKUP_FILE" 2>&1
+    # 恢复数据库（使用子 shell 正确捕获 mysql 退出码）
+    { mysql --host="$DB_HOST" \
+            --port="$DB_PORT" \
+            --user="$DB_USER" \
+            --database="$DB_NAME" \
+            --default-character-set=utf8mb4; } < "$BACKUP_FILE" 2>&1
 
     local restore_status=$?
     unset MYSQL_PWD

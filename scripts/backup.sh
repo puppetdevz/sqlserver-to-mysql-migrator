@@ -12,7 +12,7 @@ set -euo pipefail
 # ========== 配置 ==========
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.yaml"
-BACKUP_DIR="$SCRIPT_DIR/../data"
+BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/../data}"
 
 # ========== 颜色输出 ==========
 RED='\033[0;31m'
@@ -40,12 +40,17 @@ parse_args() {
                 CONFIG_FILE="$2"
                 shift 2
                 ;;
+            --backup-dir)
+                BACKUP_DIR="$2"
+                shift 2
+                ;;
             --help|-h)
                 cat << EOF
-用法: $0 [--config /path/to/config.yaml]
+用法: $0 [--config /path/to/config.yaml] [--backup-dir /path/to/backupdir]
 
-  --config    指定配置文件（默认: scripts/config.yaml）
-  --help, -h  显示帮助信息
+  --config     指定配置文件（默认: scripts/config.yaml）
+  --backup-dir 指定备份目录（默认: scripts/../data）
+  --help, -h   显示帮助信息
 EOF
                 exit 0
                 ;;
@@ -113,6 +118,14 @@ check_prerequisites() {
     [[ -z "$DB_PASS" ]] && missing_fields+=("target.password")
     if [[ ${#missing_fields[@]} -gt 0 ]]; then
         die "配置字段缺失: ${missing_fields[*]}"
+    fi
+
+    # 检查备份目录
+    if [[ -f "$BACKUP_DIR" ]]; then
+        die "备份目录是文件而非目录: $BACKUP_DIR"
+    fi
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        mkdir -p "$BACKUP_DIR" || die "无法创建备份目录: $BACKUP_DIR"
     fi
 }
 

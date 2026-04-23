@@ -181,4 +181,4 @@ main() {
     do_backup
 }
 
-main
+main "$@"

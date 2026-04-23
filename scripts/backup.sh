@@ -4,15 +4,22 @@
 # 备份目标 MySQL 数据库完整状态
 #
 # 用法:
-#   ./scripts/backup.sh                  # 使用默认 config.yaml
-#   ./scripts/backup.sh --config /path    # 指定配置文件
+#   ./scripts/backup.sh                  # 使用 scripts 目录作为备份目录
+#   BACKUP_DIR=/path/to/dir ./backup.sh # 通过环境变量指定备份目录
 #
 set -euo pipefail
 
-# ========== 配置 ==========
+# ========== 数据库配置 ==========
+DB_HOST="127.0.0.1"
+DB_PORT="3306"
+DB_NAME="migration_example_mysql"
+DB_USER="root"
+DB_PASS="your_password_here"
+
+# ========== 备份目录（默认 $SCRIPT_DIR）==========
+# 可通过环境变量 BACKUP_DIR 覆盖
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.yaml"
-BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/../data}"
+BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR}"
 
 # ========== 颜色输出 ==========
 RED='\033[0;31m'
@@ -36,21 +43,16 @@ die() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --config)
-                CONFIG_FILE="$2"
-                shift 2
-                ;;
-            --backup-dir)
-                BACKUP_DIR="$2"
-                shift 2
-                ;;
             --help|-h)
                 cat << EOF
-用法: $0 [--config /path/to/config.yaml] [--backup-dir /path/to/backupdir]
+用法: ./backup.sh
 
-  --config     指定配置文件（默认: scripts/config.yaml）
-  --backup-dir 指定备份目录（默认: scripts/../data）
-  --help, -h   显示帮助信息
+  备份文件将保存在 scripts/ 目录下
+
+示例:
+  cd scripts && ./backup.sh          # 进入 scripts 目录执行
+  ./scripts/backup.sh                 # 从项目根目录执行
+  BACKUP_DIR=/path/to/dir ./backup.sh # 通过环境变量指定备份目录
 EOF
                 exit 0
                 ;;
@@ -61,63 +63,11 @@ EOF
     done
 }
 
-# ========== 配置解析 ==========
-# config.yaml 使用嵌套结构（target.host, target.port 等）
-parse_yaml_value() {
-    local key="$1"
-    case "$key" in
-        host|port|database|user|password)
-            # 提取 target.* 字段，在 target: 缩进下查找对应 key
-            awk -v k="$key" '
-                /^target:/ { in_target=1; target_indent=length($0) - length($0##[[:space:]]); next }
-                in_target && /^[^[:space:]]/ { in_target=0 }
-                in_target && /^[[:space:]]/ {
-                    cur_indent=length($0) - length($0##[[:space:]])
-                    if (cur_indent > target_indent && $0 ~ "^[[:space:]]*" k ":") {
-                        sub(/^[[:space:]]*[^:]*:[[:space:]]*/, "")
-                        gsub(/^[ \t]+|[ \t]+$/, "")
-                        gsub(/^["'\'']|["'\'']$/g, "")
-                        print
-                        exit
-                    }
-                }
-            ' "$CONFIG_FILE"
-            ;;
-        *)
-            grep "^[[:space:]]*${key}:" "$CONFIG_FILE" | sed 's/.*:[[:space:]]*//' | tr -d '"' | tr -d "'"
-            ;;
-    esac
-}
-
 # ========== 前置检查 ==========
 check_prerequisites() {
-    # 检查配置文件
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        die "配置文件不存在: $CONFIG_FILE"
-    fi
-
     # 检查 mysqldump
     if ! command -v mysqldump &> /dev/null; then
         die "未找到 mysqldump 命令，请确保 MySQL 客户端已安装"
-    fi
-
-    # 解析配置
-    local DB_HOST DB_PORT DB_NAME DB_USER DB_PASS
-    DB_HOST=$(parse_yaml_value "host")
-    DB_PORT=$(parse_yaml_value "port")
-    DB_NAME=$(parse_yaml_value "database")
-    DB_USER=$(parse_yaml_value "user")
-    DB_PASS=$(parse_yaml_value "password")
-
-    # 检查必要字段
-    local missing_fields=()
-    [[ -z "$DB_HOST" ]] && missing_fields+=("target.host")
-    [[ -z "$DB_PORT" ]] && missing_fields+=("target.port")
-    [[ -z "$DB_NAME" ]] && missing_fields+=("target.database")
-    [[ -z "$DB_USER" ]] && missing_fields+=("target.user")
-    [[ -z "$DB_PASS" ]] && missing_fields+=("target.password")
-    if [[ ${#missing_fields[@]} -gt 0 ]]; then
-        die "配置字段缺失: ${missing_fields[*]}"
     fi
 
     # 检查备份目录

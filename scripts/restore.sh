@@ -13,7 +13,7 @@ set -euo pipefail
 # ========== 配置 ==========
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.yaml"
-BACKUP_DIR="$SCRIPT_DIR/../data"
+BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/../data}"
 
 # ========== 颜色输出 ==========
 RED='\033[0;31m'
@@ -41,15 +41,20 @@ parse_args() {
                 CONFIG_FILE="$2"
                 shift 2
                 ;;
+            --backup-dir)
+                BACKUP_DIR="$2"
+                shift 2
+                ;;
             --timestamp)
                 BACKUP_TIMESTAMP="$2"
                 shift 2
                 ;;
             --help|-h)
                 cat << EOF
-用法: $0 [--config /path/to/config.yaml] [--timestamp YYYYMMDDHHMM]
+用法: $0 [--config /path/to/config.yaml] [--backup-dir /path] [--timestamp YYYYMMDDHHMM]
 
   --config     指定配置文件（默认: scripts/config.yaml）
+  --backup-dir 指定备份目录（默认: scripts/../data）
   --timestamp  指定备份时间戳，格式: YYYYMMDDHHMM（12位）
                不指定则自动选择文件名中时间戳最新的备份
   --help, -h   显示帮助信息
@@ -58,6 +63,7 @@ parse_args() {
   $0                                    # 恢复最新备份
   $0 --timestamp 202604211200           # 恢复指定时间戳的备份
   $0 --config /path/to/config.yaml      # 使用指定配置
+  $0 --backup-dir /path/to/backups     # 使用指定备份目录
 EOF
                 exit 0
                 ;;
@@ -229,5 +235,5 @@ main() {
     do_restore
 }
 
-main
+main "$@"
 

@@ -105,6 +105,7 @@ do_backup() {
                 --user="$DB_USER" \
                 --single-transaction \
                 --quick \
+                --no-tablespaces \
                 --set-gtid-purged=OFF \
                 --databases "$DB_NAME"; } > "$backup_file" 2>&1
     local dump_status=$?

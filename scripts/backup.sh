@@ -1,11 +1,14 @@
 #!/bin/bash
 #
-# backup.sh
-# 备份目标 MySQL 数据库完整状态
+# backup.sh - 备份目标 MySQL 数据库完整状态
 #
 # 用法:
-#   ./backup.sh                  # 使用 scripts 目录作为备份目录
-#   BACKUP_DIR=/path/to/dir ./backup.sh # 通过环境变量指定备份目录
+#   ./backup.sh                  # 使用脚本目录作为备份目录
+#   BACKUP_DIR=/path/to/dir ./backup.sh
+#
+# 环境变量:
+#   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS (必填)
+#   BACKUP_DIR - 备份目录（默认: 脚本所在目录）
 #
 set -euo pipefail
 
@@ -20,12 +23,9 @@ parse_args() {
                 cat << EOF
 用法: ./backup.sh
 
-  备份文件将保存在 scripts/ 目录下
-
 示例:
-  cd scripts && ./backup.sh          # 进入 scripts 目录执行
-  ./scripts/backup.sh                 # 从项目根目录执行
-  BACKUP_DIR=/path/to/dir ./backup.sh # 通过环境变量指定备份目录
+  cd scripts && ./backup.sh
+  DB_PASS=xxx BACKUP_DIR=/path ./backup.sh
 EOF
                 exit 0
                 ;;
@@ -38,9 +38,8 @@ EOF
 
 # ========== 前置检查 ==========
 check_prerequisites() {
-    if ! command -v mysqldump &> /dev/null; then
-        die "未找到 mysqldump 命令，请确保 MySQL 客户端已安装"
-    fi
+    check_cmd mysqldump "请确保 MySQL 客户端已安装"
+    [[ -z "$DB_PASS" ]] && die "请设置 DB_PASS 环境变量"
     ensure_backup_dir
 }
 
@@ -58,27 +57,12 @@ do_backup() {
     echo_step "Backup" "开始备份数据库 $DB_NAME 到 $backup_file"
     local start_time=$(date +%s)
 
-    # 使用环境变量传递密码，避免命令行暴露
-    set +e
-    export MYSQL_PWD="$DB_PASS"
-    { mysqldump --host="$DB_HOST" \
-                --port="$DB_PORT" \
-                --user="$DB_USER" \
-                --single-transaction \
-                --quick \
-                --no-tablespaces \
-                --set-gtid-purged=OFF \
-                --databases "$DB_NAME"; } > "$backup_file" 2>&1
-    local dump_status=$?
-    unset MYSQL_PWD
-    set -e
-
-    if [[ $dump_status -ne 0 ]]; then
+    if ! run_mysqldump "$backup_file"; then
         rm -f "$backup_file"
         die "备份失败，请检查数据库连接和权限"
     fi
 
-    local duration=$(($(date +%s) - start_time))
+    local duration=$(calc_duration "$start_time")
     local size=$(du -h "$backup_file" | cut -f1)
 
     echo_step "Backup" "备份完成，耗时 ${duration}s，文件大小 $size"

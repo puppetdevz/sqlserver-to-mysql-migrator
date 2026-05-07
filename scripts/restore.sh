@@ -1,13 +1,13 @@
 #!/bin/bash
 #
-# restore.sh
-# 从 SQL 备份文件恢复 MySQL 数据库
+# restore.sh - 从 SQL 备份文件恢复 MySQL 数据库
 #
 # 用法:
 #   ./restore.sh                     # 恢复最新备份
-#   ./restore.sh --timestamp 202604211200   # 恢复指定备份
+#   ./restore.sh --timestamp YYYYMMDDHHMM   # 恢复指定备份
 #
 # 环境变量:
+#   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS (必填)
 #   BACKUP_DIR - 备份目录（默认: 脚本所在目录）
 #
 set -euo pipefail
@@ -30,14 +30,12 @@ parse_args() {
             --help|-h)
                 cat << EOF
 用法: ./restore.sh
-     ./restore.sh --timestamp 202604211200
-
-  不指定 --timestamp 则自动选择时间戳最新的备份文件
+     ./restore.sh --timestamp YYYYMMDDHHMM
 
 示例:
-  cd scripts && ./restore.sh               # 恢复最新备份
-  ./scripts/restore.sh --timestamp 202604211200  # 恢复指定备份
-  BACKUP_DIR=/path/to/dir ./restore.sh     # 通过环境变量指定备份目录
+  cd scripts && ./restore.sh
+  ./restore.sh --timestamp 202604211830
+  DB_PASS=xxx BACKUP_DIR=/path ./restore.sh
 EOF
                 exit 0
                 ;;
@@ -58,9 +56,8 @@ find_backup_file() {
 
 # ========== 前置检查 ==========
 check_prerequisites() {
-    if ! command -v mysql &> /dev/null; then
-        die "未找到 mysql 命令，请确保 MySQL 客户端已安装"
-    fi
+    check_cmd mysql "请确保 MySQL 客户端已安装"
+    [[ -z "$DB_PASS" ]] && die "请设置 DB_PASS 环境变量"
 
     if [[ -n "$BACKUP_TIMESTAMP" ]]; then
         BACKUP_FILE=$(find_backup_file "$BACKUP_TIMESTAMP")
@@ -82,28 +79,14 @@ do_restore() {
     echo_step "Restore" "开始恢复数据库 $DB_NAME from $(basename "$BACKUP_FILE")"
     local start_time=$(date +%s)
 
-    # 使用环境变量传递密码，避免命令行暴露
-    set +e
-    export MYSQL_PWD="$DB_PASS"
-
-    { mysql --host="$DB_HOST" \
-            --port="$DB_PORT" \
-            --user="$DB_USER" \
-            --database="$DB_NAME" \
-            --default-character-set=utf8mb4; } < "$BACKUP_FILE" 2>&1
-
-    local restore_status=$?
-    unset MYSQL_PWD
-    set -e
-
-    if [[ $restore_status -ne 0 ]]; then
+    if ! run_mysql_restore "$BACKUP_FILE"; then
         die "恢复失败，请检查数据库连接和备份文件完整性"
     fi
 
-    local duration=$(($(date +%s) - start_time))
+    local duration=$(calc_duration "$start_time")
 
     echo_step "Restore" "恢复完成，耗时 ${duration}s"
-    echo_info "备份文件: $BACKUP_FILE"
+    echo_info "恢复源文件: $BACKUP_FILE"
 }
 
 # ========== 主流程 ==========

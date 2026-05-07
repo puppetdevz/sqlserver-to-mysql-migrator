@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -378,10 +377,18 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	// 从 CSV 文件名提取表名 -> CSV 文件路径 的映射
 	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp)
 
-	// 获取所有需要导入的表（根据 allowedTables 过滤）
+	// 构建允许表名的查找集合（O(1) 查找）
+	allowedSet := make(map[string]struct{}, len(allowedTables))
+	for _, t := range allowedTables {
+		allowedSet[t] = struct{}{}
+	}
+
+	// 获取所有需要导入的表（根据 allowedSet 过滤）
 	var tablesToImport []string
 	for tableName := range csvTableMap {
-		if allowedTables == nil || slices.Contains(allowedTables, tableName) {
+		if allowedTables == nil {
+			tablesToImport = append(tablesToImport, tableName)
+		} else if _, ok := allowedSet[tableName]; ok {
 			tablesToImport = append(tablesToImport, tableName)
 		}
 	}

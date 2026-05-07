@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -172,7 +173,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	logger.Infof("Found %d CSV files", len(csvFiles))
 
 	// 导入数据（仅处理有 CSV 文件的表）
-	if err := importDataWithCSVMapping(cfg, conn, csvFiles, tracker); err != nil {
+	if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker); err != nil {
 		return fmt.Errorf("failed to import data: %w", err)
 	}
 
@@ -373,14 +374,16 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 }
 
 // importDataWithCSVMapping 导入数据（基于 CSV 文件映射）
-func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, tracker *progress.Tracker) error {
+func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, allowedTables []string, tracker *progress.Tracker) error {
 	// 从 CSV 文件名提取表名 -> CSV 文件路径 的映射
 	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp)
 
-	// 获取所有需要导入的表
+	// 获取所有需要导入的表（根据 allowedTables 过滤）
 	var tablesToImport []string
 	for tableName := range csvTableMap {
-		tablesToImport = append(tablesToImport, tableName)
+		if allowedTables == nil || slices.Contains(allowedTables, tableName) {
+			tablesToImport = append(tablesToImport, tableName)
+		}
 	}
 
 	logger.Infof("Starting data import for %d tables (with CSV files)...", len(tablesToImport))

@@ -383,7 +383,6 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 		allowedSet[t] = struct{}{}
 	}
 
-	// 获取所有需要导入的表（根据 allowedSet 过滤）
 	var tablesToImport []string
 	for tableName := range csvTableMap {
 		if allowedTables == nil {

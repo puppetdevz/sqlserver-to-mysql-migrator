@@ -406,11 +406,20 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	}
 
 	var tablesToImport []string
+	// First add tables from CSV map that are in allowed set
 	for tableName := range csvTableMap {
 		if allowedTables == nil {
 			tablesToImport = append(tablesToImport, tableName)
 		} else if _, ok := allowedSet[tableName]; ok {
 			tablesToImport = append(tablesToImport, tableName)
+		}
+	}
+	// Then add allowed tables not in CSV map (for CSV_NOT_FOUND diagnostic)
+	if allowedTables != nil {
+		for _, t := range allowedTables {
+			if _, inCSV := csvTableMap[t]; !inCSV {
+				tablesToImport = append(tablesToImport, t)
+			}
 		}
 	}
 

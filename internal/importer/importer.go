@@ -351,17 +351,19 @@ const (
 	MaxDiagnosticColumns = 10
 	ErrorTypeEOF         = "EOF"
 	ErrorTypeNoMatch     = "NO_MATCH"
+	ErrorTypeCSVNotFound = "CSV_NOT_FOUND"
 )
 
 // ImportDiagnostic carries structured diagnostic info for failed imports.
 // Returned alongside error so the caller can log it before continuing.
 type ImportDiagnostic struct {
 	TableName   string
-	ErrorType   string  // ErrorTypeEOF or ErrorTypeNoMatch
+	ErrorType   string  // ErrorTypeEOF, ErrorTypeNoMatch, or ErrorTypeCSVNotFound
 	ErrorDetail string  // e.g. "failed to read CSV header (EOF)"
 	CSVPath     string
 	CSVColumns  []string
 	DBColumns   []string
+	TriedPaths  []string // only populated for CSV_NOT_FOUND
 }
 
 func limitSlice(s []string, max int) []string {

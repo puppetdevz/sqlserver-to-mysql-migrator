@@ -64,7 +64,7 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("migration.on_duplicate must be 'replace' or 'ignore'")
 	}
 	if cfg.Migration.StateDir == "" {
-		cfg.Migration.StateDir = ".migration_state" // 默认值
+		cfg.Migration.StateDir = "." // 根目录
 	}
 
 	// 验证日志配置

@@ -30,6 +30,21 @@ const (
 	Version = "1.0.0"
 )
 
+func logImportDiagnostic(diag *importer.ImportDiagnostic) {
+	if diag == nil {
+		return
+	}
+	if diag.ErrorType == "EOF" {
+		logger.Warnf("CSV import diagnostic: table=%s\n  Error: %s\n  CSV file: %s\n  Action: skipped — no data to import",
+			diag.TableName, diag.ErrorDetail, diag.CSVPath)
+	} else if diag.ErrorType == "NO_MATCH" {
+		logger.Warnf("CSV import diagnostic: table=%s\n  Error: %s\n  CSV file: %s\n  CSV columns (sample, max %d): %s\n  DB columns (sample, max %d): %s\n  Action: skipped — column names do not match DB schema",
+			diag.TableName, diag.ErrorDetail, diag.CSVPath,
+			importer.MaxDiagnosticColumns, strings.Join(diag.CSVColumns, ","),
+			importer.MaxDiagnosticColumns, strings.Join(diag.DBColumns, ","))
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -427,9 +442,10 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				tracker.StartTable(tableName, csvPath, false)
 
 				// 导入数据
-				result, err, _ := dataImporter.ImportTable(tableName)
+				result, err, diag := dataImporter.ImportTable(tableName)
 				if err != nil {
 					logger.Errorf("[Worker %d] Failed to import table %s: %v", workerID, tableName, err)
+					logImportDiagnostic(diag)
 					tracker.FailTable(tableName, err.Error())
 					resultChan <- &importer.ImportResult{
 						TableName:    tableName,

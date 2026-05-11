@@ -43,8 +43,8 @@ func logImportDiagnostic(diag *importer.ImportDiagnostic) {
 			importer.MaxDiagnosticColumns, strings.Join(diag.CSVColumns, ","),
 			importer.MaxDiagnosticColumns, strings.Join(diag.DBColumns, ","))
 	} else if diag.ErrorType == importer.ErrorTypeCSVNotFound {
-		logger.Warnf("CSV import diagnostic: table=%s\n  Error: CSV file not found for table %s\n  CSV file: (none)\n  Tried paths (in order):\n    %s\n  Action: skipped — CSV file does not exist",
-			diag.TableName, diag.TableName,
+		logger.Warnf("CSV import diagnostic: table=%s\n  Error: CSV file not found\n  CSV file: (none)\n  Tried paths (in order):\n    %s\n  Action: skipped — CSV file does not exist",
+			diag.TableName,
 			strings.Join(diag.TriedPaths, "\n    "))
 	} else {
 		logger.Warnf("CSV import diagnostic: table=%s\n  Error: %s\n  CSV file: %s\n  Action: unknown error type — skipped",
@@ -205,41 +205,6 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 func scanCSVFiles(directory string) ([]string, error) {
 	pattern := filepath.Join(directory, "*.csv")
 	return filepath.Glob(pattern)
-}
-
-// extractTableNames 从 CSV 文件名提取表名
-func extractTableNames(csvFiles []string, timestamp string) []string {
-	tableMap := make(map[string]bool)
-
-	for _, csvFile := range csvFiles {
-		baseName := filepath.Base(csvFile)
-		// 移除 .csv 后缀
-		baseName = strings.TrimSuffix(baseName, ".csv")
-		// 检测双下划线模式：文件名格式为 sample_main_101__202602261058
-		// 双下划线在时间戳之前，需要在去除时间戳之前检测
-		hasDoubleUnderscore := strings.Contains(baseName, "__")
-		// 移除时间戳后缀
-		if timestamp != "" {
-			baseName = strings.TrimSuffix(baseName, "_"+timestamp)
-		}
-		// 转换为大写（统一处理）
-		tableName := strings.ToUpper(baseName)
-		// 去除尾部下划线
-		tableName = strings.TrimSuffix(tableName, "_")
-		// 关键修复：如果原始文件名包含双下划线（sample_main_101__），
-		// 说明对应 DDL 中的带 $ 表名（sample_main_101$）
-		if hasDoubleUnderscore {
-			tableName = tableName + "$"
-		}
-		tableMap[tableName] = true
-	}
-
-	var tableNames []string
-	for tableName := range tableMap {
-		tableNames = append(tableNames, tableName)
-	}
-
-	return tableNames
 }
 
 // filterTables 过滤表列表
@@ -624,56 +589,4 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 	}
 
 	logger.Warn("See migration.log for detailed error information")
-}
-
-// findCSVFile 查找 CSV 文件
-func findCSVFile(directory, tableName, timestamp string) (string, error) {
-	// 优先使用精确时间戳匹配，避免匹配到同名不同后缀的表
-	// 例如：FORM_TRIGGER_RECORD 和 FORM_TRIGGER_RECORD_0034 是不同的表
-	if timestamp != "" {
-		patterns := []string{
-			filepath.Join(directory, fmt.Sprintf("%s_%s.csv", tableName, timestamp)),
-			filepath.Join(directory, fmt.Sprintf("%s_%s.csv", strings.ToLower(tableName), timestamp)),
-			filepath.Join(directory, fmt.Sprintf("%s_%s.csv", strings.ToUpper(tableName), timestamp)),
-		}
-		for _, pattern := range patterns {
-			if _, err := os.Stat(pattern); err == nil {
-				return pattern, nil
-			}
-		}
-	}
-
-	// 回退到 glob 模糊匹配（仅当精确匹配失败时）
-	patterns := []string{
-		filepath.Join(directory, fmt.Sprintf("%s_*.csv", tableName)),
-		filepath.Join(directory, fmt.Sprintf("%s_*.csv", strings.ToLower(tableName))),
-		filepath.Join(directory, fmt.Sprintf("%s_*.csv", strings.ToUpper(tableName))),
-	}
-
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err == nil && len(matches) > 0 {
-			// 返回第一个匹配结果
-			return matches[0], nil
-		}
-	}
-
-	// 处理 DDL 表名尾部 $ 对应 CSV 文件名尾部 __
-	if strings.HasSuffix(tableName, "$") {
-		csvTableName := strings.TrimSuffix(tableName, "$") + "__"
-		// 直接使用 csvTableName 作为前缀，不额外添加下划线
-		subPattern := filepath.Join(directory, csvTableName+"*.csv")
-		matches, err := filepath.Glob(subPattern)
-		if err == nil && len(matches) > 0 {
-			return matches[0], nil
-		}
-		// 也尝试小写版本
-		subPattern = filepath.Join(directory, strings.ToLower(csvTableName)+"*.csv")
-		matches, err = filepath.Glob(subPattern)
-		if err == nil && len(matches) > 0 {
-			return matches[0], nil
-		}
-	}
-
-	return "", fmt.Errorf("CSV file not found for table: %s", tableName)
 }

@@ -23,7 +23,10 @@
 /migrate
 
 # Migration state (runtime generated)
-.migration_state/
+state.db
+state.db-journal
+state.db-wal
+state.db-shm
 
 # Logs
 logs/

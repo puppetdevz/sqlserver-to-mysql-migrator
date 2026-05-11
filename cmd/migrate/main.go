@@ -418,11 +418,14 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					// Call FindCSVFile directly to get the diagnostic with TriedPaths
 					_, _, diag := dataImporter.FindCSVFile(tableName)
 					logImportDiagnostic(diag)
-					tracker.FailTable(tableName, "CSV file not found")
+					// CSV_NOT_FOUND 是正常情况（数据不存在），不记为失败
 					resultChan <- &importer.ImportResult{
-						TableName:    tableName,
-						Success:      false,
-						ErrorMessage: "CSV file not found",
+						TableName:     tableName,
+						Success:       true, // CSV不存在不算失败，只是没有数据
+						InsertedRows:  0,
+						ProcessedRows: 0,
+						ErrorCount:    0,
+						ErrorMessage:  "",
 					}
 					continue
 				}

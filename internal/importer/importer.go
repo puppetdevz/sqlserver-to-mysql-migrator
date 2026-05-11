@@ -159,7 +159,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		file.Close()
 		diag := &ImportDiagnostic{
 			TableName:   ti.tableName,
-			ErrorType:   "EOF",
+			ErrorType:   ErrorTypeEOF,
 			ErrorDetail: fmt.Sprintf("failed to read CSV header (%v)", err),
 			CSVPath:     ti.csvPath,
 		}
@@ -191,7 +191,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	if inserter == nil {
 		diag := &ImportDiagnostic{
 			TableName:   ti.tableName,
-			ErrorType:   "NO_MATCH",
+			ErrorType:   ErrorTypeNoMatch,
 			ErrorDetail: fmt.Sprintf("no valid columns to insert (0/%d matched)", len(dbColumns)),
 			CSVPath:     ti.csvPath,
 			CSVColumns:  limitSlice(headers, MaxDiagnosticColumns),
@@ -347,14 +347,17 @@ type ImportResult struct {
 	ErrorMessage  string
 }
 
-// MaxDiagnosticColumns is the max number of column names to include in a diagnostic
-const MaxDiagnosticColumns = 10
+const (
+	MaxDiagnosticColumns = 10
+	ErrorTypeEOF         = "EOF"
+	ErrorTypeNoMatch     = "NO_MATCH"
+)
 
 // ImportDiagnostic carries structured diagnostic info for failed imports.
 // Returned alongside error so the caller can log it before continuing.
 type ImportDiagnostic struct {
 	TableName   string
-	ErrorType   string  // "EOF" or "NO_MATCH"
+	ErrorType   string  // ErrorTypeEOF or ErrorTypeNoMatch
 	ErrorDetail string  // e.g. "failed to read CSV header (EOF)"
 	CSVPath     string
 	CSVColumns  []string

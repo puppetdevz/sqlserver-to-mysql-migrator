@@ -42,6 +42,10 @@ func logImportDiagnostic(diag *importer.ImportDiagnostic) {
 			diag.TableName, diag.ErrorDetail, diag.CSVPath,
 			importer.MaxDiagnosticColumns, strings.Join(diag.CSVColumns, ","),
 			importer.MaxDiagnosticColumns, strings.Join(diag.DBColumns, ","))
+	} else if diag.ErrorType == importer.ErrorTypeCSVNotFound {
+		logger.Warnf("CSV import diagnostic: table=%s\n  Error: CSV file not found for table %s\n  CSV file: (none)\n  Tried paths (in order):\n    %s\n  Action: skipped — CSV file does not exist",
+			diag.TableName, diag.TableName,
+			strings.Join(diag.TriedPaths, "\n    "))
 	} else {
 		logger.Warnf("CSV import diagnostic: table=%s\n  Error: %s\n  CSV file: %s\n  Action: unknown error type — skipped",
 			diag.TableName, diag.ErrorType, diag.CSVPath)

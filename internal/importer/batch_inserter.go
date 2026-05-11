@@ -116,7 +116,7 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	}
 
 	// 根据列数计算每批最大行数，避免超出 MySQL prepared statement 占位符限制
-	maxRowsPerBatch := maxPreparedPlaceholders / len(bi.columns)
+	maxRowsPerBatch := (maxPreparedPlaceholders * 85) / (100 * len(bi.columns))
 	if maxRowsPerBatch < 1 {
 		maxRowsPerBatch = 1
 	}

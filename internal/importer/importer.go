@@ -552,77 +552,69 @@ func (di *DataImporter) GetErrorRecorder() *ErrorRecorder {
 	return di.errorRecorder
 }
 
+// tryPaths tries each path in order, returning the first that exists.
+// All attempted paths (including not-found) are appended to triedPaths.
+func tryPaths(paths []string, triedPaths *[]string) string {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		*triedPaths = append(*triedPaths, p)
+	}
+	return ""
+}
+
 // FindCSVFile 查找表对应的 CSV 文件（精确匹配，无模糊匹配）
 func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDiagnostic) {
 	var triedPaths []string
 	csvDir := di.cfg.Source.CSVDirectory
 
-	// 1. With CSVTimestamp: try exact TABLE_TIMESTAMP.csv (3 case variants)
 	if di.cfg.Source.CSVTimestamp != "" {
 		ts := di.cfg.Source.CSVTimestamp
-		candidates := []string{
+		if path := tryPaths([]string{
 			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", tableName, ts)),
 			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToLower(tableName), ts)),
 			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToUpper(tableName), ts)),
-		}
-		for _, p := range candidates {
-			if _, err := os.Stat(p); err == nil {
-				return p, nil, nil
-			}
-			triedPaths = append(triedPaths, p)
+		}, &triedPaths); path != "" {
+			return path, nil, nil
 		}
 		// $ suffix: TABLE$_TIMESTAMP → TABLE__TIMESTAMP.csv
 		if strings.HasSuffix(tableName, "$") {
 			base := strings.TrimSuffix(tableName, "$") + "__"
-			candidates := []string{
+			if path := tryPaths([]string{
 				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", base, ts)),
 				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToLower(base), ts)),
 				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToUpper(base), ts)),
-			}
-			for _, p := range candidates {
-				if _, err := os.Stat(p); err == nil {
-					return p, nil, nil
-				}
-				triedPaths = append(triedPaths, p)
+			}, &triedPaths); path != "" {
+				return path, nil, nil
 			}
 		}
 	} else {
-		// 2. Without CSVTimestamp: exact TABLE.csv (3 case variants)
-		candidates := []string{
+		if path := tryPaths([]string{
 			filepath.Join(csvDir, tableName+".csv"),
 			filepath.Join(csvDir, strings.ToLower(tableName)+".csv"),
 			filepath.Join(csvDir, strings.ToUpper(tableName)+".csv"),
+		}, &triedPaths); path != "" {
+			return path, nil, nil
 		}
-		for _, p := range candidates {
-			if _, err := os.Stat(p); err == nil {
-				return p, nil, nil
-			}
-			triedPaths = append(triedPaths, p)
-		}
-
 		// $ suffix: TABLE$ → TABLE__.csv
 		if strings.HasSuffix(tableName, "$") {
 			base := strings.TrimSuffix(tableName, "$") + "__"
-			candidates := []string{
+			if path := tryPaths([]string{
 				filepath.Join(csvDir, base+".csv"),
 				filepath.Join(csvDir, strings.ToLower(base)+".csv"),
 				filepath.Join(csvDir, strings.ToUpper(base)+".csv"),
-			}
-			for _, p := range candidates {
-				if _, err := os.Stat(p); err == nil {
-					return p, nil, nil
-				}
-				triedPaths = append(triedPaths, p)
+			}, &triedPaths); path != "" {
+				return path, nil, nil
 			}
 		}
 	}
 
-	diag := &ImportDiagnostic{
+	return "", fmt.Errorf("CSV file not found for table: %s", tableName), &ImportDiagnostic{
 		TableName:  tableName,
 		ErrorType:  ErrorTypeCSVNotFound,
 		TriedPaths: triedPaths,
 	}
-	return "", fmt.Errorf("CSV file not found for table: %s", tableName), diag
 }
 
 // ImportTables 批量导入表

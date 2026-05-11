@@ -441,7 +441,9 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				// 查找 CSV 文件路径
 				csvPath, ok := csvTableMap[tableName]
 				if !ok {
-					logger.Warnf("No CSV file found for table: %s", tableName)
+					// Call FindCSVFile directly to get the diagnostic with TriedPaths
+					_, _, diag := dataImporter.FindCSVFile(tableName)
+					logImportDiagnostic(diag)
 					continue
 				}
 

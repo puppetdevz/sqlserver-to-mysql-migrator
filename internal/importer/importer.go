@@ -527,7 +527,7 @@ func NewDataImporter(conn *database.Connection, cfg *config.Config) *DataImporte
 // ImportTable 导入单个表
 func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *ImportDiagnostic) {
 	// 查找 CSV 文件
-	csvPath, err, diag := di.findCSVFile(tableName)
+	csvPath, err, diag := di.FindCSVFile(tableName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find CSV file for table %s: %w", tableName, err), diag
 	}
@@ -552,8 +552,8 @@ func (di *DataImporter) GetErrorRecorder() *ErrorRecorder {
 	return di.errorRecorder
 }
 
-// findCSVFile 查找表对应的 CSV 文件
-func (di *DataImporter) findCSVFile(tableName string) (string, error, *ImportDiagnostic) {
+// FindCSVFile 查找表对应的 CSV 文件
+func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDiagnostic) {
 	var triedPaths []string
 	csvDir := di.cfg.Source.CSVDirectory
 

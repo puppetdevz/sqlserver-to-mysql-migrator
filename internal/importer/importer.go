@@ -552,12 +552,12 @@ func (di *DataImporter) GetErrorRecorder() *ErrorRecorder {
 	return di.errorRecorder
 }
 
-// FindCSVFile 查找表对应的 CSV 文件
+// FindCSVFile 查找表对应的 CSV 文件（精确匹配，无模糊匹配）
 func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDiagnostic) {
 	var triedPaths []string
 	csvDir := di.cfg.Source.CSVDirectory
 
-	// 1. With timestamp: try exact paths
+	// 1. With CSVTimestamp: try exact TABLE_TIMESTAMP.csv (3 case variants)
 	if di.cfg.Source.CSVTimestamp != "" {
 		ts := di.cfg.Source.CSVTimestamp
 		candidates := []string{
@@ -571,46 +571,49 @@ func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDia
 			}
 			triedPaths = append(triedPaths, p)
 		}
-	} else {
-		// 2. No timestamp: enumerate CSV files, find first {TABLE}_[^_]+\.csv
-		prefix := tableName + "_"
-		lowerPrefix := strings.ToLower(prefix)
-		upperPrefix := strings.ToUpper(prefix)
-		entries, err := os.ReadDir(csvDir)
-		if err != nil {
-			return "", fmt.Errorf("failed to read CSV directory: %w", err), nil
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".csv") {
-				continue
+		// $ suffix: TABLE$_TIMESTAMP → TABLE__TIMESTAMP.csv
+		if strings.HasSuffix(tableName, "$") {
+			base := strings.TrimSuffix(tableName, "$") + "__"
+			candidates := []string{
+				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", base, ts)),
+				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToLower(base), ts)),
+				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToUpper(base), ts)),
 			}
-			name := entry.Name()
-			// Only match files starting with TABLE_ followed by at least one char and more segments
-			// e.g. AGENT_202602261058.csv matches, AGENT_DETAIL.csv does NOT (DETAIL has no _)
-			if strings.HasPrefix(name, prefix) || strings.HasPrefix(name, lowerPrefix) || strings.HasPrefix(name, upperPrefix) {
-				p := filepath.Join(csvDir, name)
-				remainder := name[len(prefix):]
-				if strings.Contains(remainder, "_") && !strings.HasPrefix(remainder, "_") {
+			for _, p := range candidates {
+				if _, err := os.Stat(p); err == nil {
 					return p, nil, nil
 				}
-				triedPaths = append(triedPaths, p) // matched prefix but no second _ → record as tried
+				triedPaths = append(triedPaths, p)
 			}
 		}
-	}
-
-	// 3. Special case: $ suffix → __ (e.g. TABLE$ → TABLE__.csv)
-	if strings.HasSuffix(tableName, "$") {
-		csvBase := strings.TrimSuffix(tableName, "$") + "__"
+	} else {
+		// 2. Without CSVTimestamp: exact TABLE.csv (3 case variants)
 		candidates := []string{
-			filepath.Join(csvDir, csvBase+".csv"),
-			filepath.Join(csvDir, strings.ToLower(csvBase)+".csv"),
-			filepath.Join(csvDir, strings.ToUpper(csvBase)+".csv"),
+			filepath.Join(csvDir, tableName+".csv"),
+			filepath.Join(csvDir, strings.ToLower(tableName)+".csv"),
+			filepath.Join(csvDir, strings.ToUpper(tableName)+".csv"),
 		}
 		for _, p := range candidates {
 			if _, err := os.Stat(p); err == nil {
 				return p, nil, nil
 			}
 			triedPaths = append(triedPaths, p)
+		}
+
+		// $ suffix: TABLE$ → TABLE__.csv
+		if strings.HasSuffix(tableName, "$") {
+			base := strings.TrimSuffix(tableName, "$") + "__"
+			candidates := []string{
+				filepath.Join(csvDir, base+".csv"),
+				filepath.Join(csvDir, strings.ToLower(base)+".csv"),
+				filepath.Join(csvDir, strings.ToUpper(base)+".csv"),
+			}
+			for _, p := range candidates {
+				if _, err := os.Stat(p); err == nil {
+					return p, nil, nil
+				}
+				triedPaths = append(triedPaths, p)
+			}
 		}
 	}
 

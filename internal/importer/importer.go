@@ -527,9 +527,9 @@ func NewDataImporter(conn *database.Connection, cfg *config.Config) *DataImporte
 // ImportTable 导入单个表
 func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *ImportDiagnostic) {
 	// 查找 CSV 文件
-	csvPath, err := di.findCSVFile(tableName)
+	csvPath, err, diag := di.findCSVFile(tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find CSV file for table %s: %w", tableName, err), nil
+		return nil, fmt.Errorf("failed to find CSV file for table %s: %w", tableName, err), diag
 	}
 
 	// 创建表导入器
@@ -553,53 +553,73 @@ func (di *DataImporter) GetErrorRecorder() *ErrorRecorder {
 }
 
 // findCSVFile 查找表对应的 CSV 文件
-func (di *DataImporter) findCSVFile(tableName string) (string, error) {
-	timestamp := di.cfg.Source.CSVTimestamp
+func (di *DataImporter) findCSVFile(tableName string) (string, error, *ImportDiagnostic) {
+	var triedPaths []string
+	csvDir := di.cfg.Source.CSVDirectory
 
-	// 优先使用精确时间戳匹配
-	if timestamp != "" {
-		patterns := []string{
-			filepath.Join(di.cfg.Source.CSVDirectory, fmt.Sprintf("%s_%s.csv", tableName, timestamp)),
-			filepath.Join(di.cfg.Source.CSVDirectory, fmt.Sprintf("%s_%s.csv", strings.ToLower(tableName), timestamp)),
-			filepath.Join(di.cfg.Source.CSVDirectory, fmt.Sprintf("%s_%s.csv", strings.ToUpper(tableName), timestamp)),
+	// 1. With timestamp: try exact paths
+	if di.cfg.Source.CSVTimestamp != "" {
+		ts := di.cfg.Source.CSVTimestamp
+		candidates := []string{
+			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", tableName, ts)),
+			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToLower(tableName), ts)),
+			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToUpper(tableName), ts)),
 		}
-		for _, pattern := range patterns {
-			if _, err := os.Stat(pattern); err == nil {
-				return pattern, nil
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				return p, nil, nil
+			}
+			triedPaths = append(triedPaths, p)
+		}
+	} else {
+		// 2. No timestamp: enumerate CSV files, find first {TABLE}_[^_]+\.csv
+		prefix := tableName + "_"
+		lowerPrefix := strings.ToLower(prefix)
+		upperPrefix := strings.ToUpper(prefix)
+		entries, err := os.ReadDir(csvDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to read CSV directory: %w", err), nil
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".csv") {
+				continue
+			}
+			name := entry.Name()
+			// Only match files starting with TABLE_ followed by at least one char and more segments
+			// e.g. AGENT_202602261058.csv matches, AGENT_DETAIL.csv does NOT (DETAIL has no _)
+			if strings.HasPrefix(name, prefix) || strings.HasPrefix(name, lowerPrefix) || strings.HasPrefix(name, upperPrefix) {
+				p := filepath.Join(csvDir, name)
+				remainder := name[len(prefix):]
+				if strings.Contains(remainder, "_") && !strings.HasPrefix(remainder, "_") {
+					return p, nil, nil
+				}
+				triedPaths = append(triedPaths, p) // matched prefix but no second _ → record as tried
 			}
 		}
 	}
 
-	// 回退到 glob 模糊匹配
-	patterns := []string{
-		filepath.Join(di.cfg.Source.CSVDirectory, fmt.Sprintf("%s_*.csv", tableName)),
-		filepath.Join(di.cfg.Source.CSVDirectory, fmt.Sprintf("%s_*.csv", strings.ToLower(tableName))),
-		filepath.Join(di.cfg.Source.CSVDirectory, fmt.Sprintf("%s_*.csv", strings.ToUpper(tableName))),
-	}
-
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err == nil && len(matches) > 0 {
-			return matches[0], nil
-		}
-	}
-
-	// 处理 $ 表名对应 __ CSV 文件名
+	// 3. Special case: $ suffix → __ (e.g. TABLE$ → TABLE__.csv)
 	if strings.HasSuffix(tableName, "$") {
-		csvTableName := strings.TrimSuffix(tableName, "$") + "__"
-		subPattern := filepath.Join(di.cfg.Source.CSVDirectory, csvTableName+"*.csv")
-		matches, err := filepath.Glob(subPattern)
-		if err == nil && len(matches) > 0 {
-			return matches[0], nil
+		csvBase := strings.TrimSuffix(tableName, "$") + "__"
+		candidates := []string{
+			filepath.Join(csvDir, csvBase+".csv"),
+			filepath.Join(csvDir, strings.ToLower(csvBase)+".csv"),
+			filepath.Join(csvDir, strings.ToUpper(csvBase)+".csv"),
 		}
-		subPattern = filepath.Join(di.cfg.Source.CSVDirectory, strings.ToLower(csvTableName)+"*.csv")
-		matches, err = filepath.Glob(subPattern)
-		if err == nil && len(matches) > 0 {
-			return matches[0], nil
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				return p, nil, nil
+			}
+			triedPaths = append(triedPaths, p)
 		}
 	}
 
-	return "", fmt.Errorf("CSV file not found for table: %s", tableName)
+	diag := &ImportDiagnostic{
+		TableName:  tableName,
+		ErrorType:  ErrorTypeCSVNotFound,
+		TriedPaths: triedPaths,
+	}
+	return "", fmt.Errorf("CSV file not found for table: %s", tableName), diag
 }
 
 // ImportTables 批量导入表

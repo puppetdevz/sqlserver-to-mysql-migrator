@@ -42,43 +42,44 @@ func NewTableImporter(conn *database.Connection, cfg *config.Config, tableName s
 }
 
 // Import 导入表数据（流水线优化：边读边写）
-func (ti *TableImporter) Import() (*ImportResult, error) {
+func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	logger.Infof("Starting import for table: %s", ti.tableName)
 
 	// 检查表是否存在
 	exists, err := ti.conn.TableExists(ti.tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check table existence: %w", err)
+		return nil, fmt.Errorf("failed to check table existence: %w", err), nil
 	}
 
 	if !exists {
-		return nil, fmt.Errorf("table does not exist: %s", ti.tableName)
+		return nil, fmt.Errorf("table does not exist: %s", ti.tableName), nil
 	}
 
 	// 如果配置要求，先清空表
 	if ti.cfg.Migration.TruncateBeforeImport {
 		logger.Infof("Truncating table: %s", ti.tableName)
 		if err := ti.conn.TruncateTable(ti.tableName); err != nil {
-			return nil, fmt.Errorf("failed to truncate table: %w", err)
+			return nil, fmt.Errorf("failed to truncate table: %w", err), nil
 		}
 	}
 
 	// 打开 CSV 文件
 	file, err := os.Open(ti.csvPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open CSV file: %w", err)
+		return nil, fmt.Errorf("failed to open CSV file: %w", err), nil
 	}
 
 	// 获取正确大小写的表名（解决 MySQL 大小写不敏感问题）
 	actualTableName := ti.conn.GetActualTableName(ti.tableName)
 
 	// 使用流水线导入
-	result, err := ti.pipelinedImport(file, actualTableName)
+	result, err, diag := ti.pipelinedImport(file, actualTableName)
 	if err != nil {
 		ti.errorRecorder.RecordError(ti.tableName, "", nil, err)
+		return nil, err, diag
 	}
 
-	return result, err
+	return result, nil, nil
 }
 
 // getDBColumns 获取数据库中表的列
@@ -147,7 +148,7 @@ func filterRowDataByInterface(row []interface{}, mapping []int) []interface{} {
 }
 
 // pipelinedImport 流水线导入：边读边写
-func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) (*ImportResult, error) {
+func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) (*ImportResult, error, *ImportDiagnostic) {
 	reader := csv.NewReader(file)
 	reader.LazyQuotes = true
 	reader.TrimLeadingSpace = true
@@ -156,7 +157,13 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	headers, err := reader.Read()
 	if err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to read CSV header: %w", err)
+		diag := &ImportDiagnostic{
+			TableName:   ti.tableName,
+			ErrorType:   "EOF",
+			ErrorDetail: fmt.Sprintf("failed to read CSV header (%v)", err),
+			CSVPath:     ti.csvPath,
+		}
+		return nil, fmt.Errorf("failed to read CSV header: %w", err), diag
 	}
 	// 清理表头（移除 BOM、空格等）
 	for i := range headers {
@@ -182,7 +189,15 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		ti.cfg.Migration.OnDuplicate,
 	)
 	if inserter == nil {
-		return nil, fmt.Errorf("no valid columns to insert for table %s", actualTableName)
+		diag := &ImportDiagnostic{
+			TableName:   ti.tableName,
+			ErrorType:   "NO_MATCH",
+			ErrorDetail: fmt.Sprintf("no valid columns to insert (0/%d matched)", len(dbColumns)),
+			CSVPath:     ti.csvPath,
+			CSVColumns:  limitSlice(headers, MaxDiagnosticColumns),
+			DBColumns:   limitSlice(dbColumns, MaxDiagnosticColumns),
+		}
+		return nil, fmt.Errorf("no valid columns to insert for table %s", actualTableName), diag
 	}
 	defer inserter.Close()
 
@@ -307,7 +322,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 			ErrorCount:    errorCount,
 			Success:       false,
 			ErrorMessage:  lastErr.Error(),
-		}, lastErr
+		}, lastErr, nil
 	}
 
 	logger.Infof("Import completed for table %s: %d rows processed, %d rows inserted, %d errors",
@@ -319,7 +334,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		InsertedRows:  totalRows,
 		ErrorCount:    errorCount,
 		Success:       errorCount == 0,
-	}, nil
+	}, nil, nil
 }
 
 // ImportResult 导入结果
@@ -330,6 +345,27 @@ type ImportResult struct {
 	ErrorCount    int64
 	Success       bool
 	ErrorMessage  string
+}
+
+// MaxDiagnosticColumns is the max number of column names to include in a diagnostic
+const MaxDiagnosticColumns = 10
+
+// ImportDiagnostic carries structured diagnostic info for failed imports.
+// Returned alongside error so the caller can log it before continuing.
+type ImportDiagnostic struct {
+	TableName   string
+	ErrorType   string  // "EOF" or "NO_MATCH"
+	ErrorDetail string  // e.g. "failed to read CSV header (EOF)"
+	CSVPath     string
+	CSVColumns  []string
+	DBColumns   []string
+}
+
+func limitSlice(s []string, max int) []string {
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 // ErrorRecorder 错误记录器
@@ -484,11 +520,11 @@ func NewDataImporter(conn *database.Connection, cfg *config.Config) *DataImporte
 }
 
 // ImportTable 导入单个表
-func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error) {
+func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *ImportDiagnostic) {
 	// 查找 CSV 文件
 	csvPath, err := di.findCSVFile(tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find CSV file for table %s: %w", tableName, err)
+		return nil, fmt.Errorf("failed to find CSV file for table %s: %w", tableName, err), nil
 	}
 
 	// 创建表导入器
@@ -566,7 +602,7 @@ func (di *DataImporter) ImportTables(tableNames []string) ([]*ImportResult, erro
 	results := make([]*ImportResult, 0, len(tableNames))
 
 	for _, tableName := range tableNames {
-		result, err := di.ImportTable(tableName)
+		result, err, _ := di.ImportTable(tableName)
 		if err != nil {
 			logger.Errorf("Failed to import table %s: %v", tableName, err)
 			results = append(results, &ImportResult{
@@ -638,7 +674,7 @@ func (pi *PipelinedImporter) ImportMultiple(tableNames []string) ([]*ImportResul
 			for tableName := range tableChan {
 				logger.Debugf("[Worker %d] Processing table: %s", workerID, tableName)
 
-				result, err := importer.ImportTable(tableName)
+				result, err, _ := importer.ImportTable(tableName)
 				if err != nil {
 					logger.Errorf("[Worker %d] Failed to import table %s: %v", workerID, tableName, err)
 					result = &ImportResult{

@@ -427,7 +427,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				tracker.StartTable(tableName, csvPath, false)
 
 				// 导入数据
-				result, err := dataImporter.ImportTable(tableName)
+				result, err, _ := dataImporter.ImportTable(tableName)
 				if err != nil {
 					logger.Errorf("[Worker %d] Failed to import table %s: %v", workerID, tableName, err)
 					tracker.FailTable(tableName, err.Error())

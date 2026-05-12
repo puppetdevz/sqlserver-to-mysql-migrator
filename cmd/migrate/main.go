@@ -64,6 +64,24 @@ func main() {
 		os.Exit(0)
 	}
 
+	// 检测是否启用后缀移除模式
+	if *removePostfix != "" {
+		if *targetDir == "" {
+			fmt.Fprintln(os.Stderr, "Error: --target is required when using --remove-postfix")
+			os.Exit(1)
+		}
+		// 初始化日志（用于 renameCSVFiles 输出）
+		if err := logger.Init("INFO", "", true, 0, 0, 0); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+			os.Exit(1)
+		}
+		if err := renameCSVFiles(*removePostfix, *targetDir, *dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// 加载配置
 	cfg, err := config.Load(*configPath)
 	if err != nil {

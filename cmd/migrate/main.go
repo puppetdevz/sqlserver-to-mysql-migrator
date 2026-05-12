@@ -631,8 +631,10 @@ func renameCSVFiles(postfix, dir string, previewOnly bool) error {
 
 	for _, filePath := range files {
 		fileName := filepath.Base(filePath)
-		if strings.HasSuffix(fileName, postfix) {
-			newName := strings.TrimSuffix(fileName, postfix)
+		// 去掉 .csv 扩展名后检查是否以后缀结尾
+		nameWithoutExt := strings.TrimSuffix(fileName, ".csv")
+		if strings.HasSuffix(nameWithoutExt, postfix) {
+			newName := strings.TrimSuffix(nameWithoutExt, postfix) + ".csv"
 			newPath := filepath.Join(dir, newName)
 
 			// 检查目标文件是否已存在

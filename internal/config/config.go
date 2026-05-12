@@ -15,9 +15,10 @@ type Config struct {
 
 // SourceConfig 源数据配置
 type SourceConfig struct {
-	DDLFile      string `yaml:"ddl_file"`
-	CSVDirectory string `yaml:"csv_directory"`
-	CSVTimestamp string `yaml:"csv_timestamp"`
+	DDLFile       string `yaml:"ddl_file"`
+	CSVDirectory  string `yaml:"csv_directory"`
+	CSVTimestamp  string `yaml:"csv_timestamp"`
+	CSVHasHeader  bool   `yaml:"csv_has_header"` // CSV 文件是否包含表头，默认 true
 }
 
 // TargetConfig 目标数据库配置

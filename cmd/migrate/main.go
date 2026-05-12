@@ -598,7 +598,7 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 }
 
 // renameCSVFiles 批量重命名 CSV 文件
-func renameCSVFiles(postfix, dir string, dryRun bool) error {
+func renameCSVFiles(postfix, dir string, previewOnly bool) error {
 	if postfix == "" || dir == "" {
 		return fmt.Errorf("postfix and target directory are required")
 	}
@@ -619,7 +619,7 @@ func renameCSVFiles(postfix, dir string, dryRun bool) error {
 
 			// 检查目标文件是否已存在
 			if _, err := os.Stat(newPath); err == nil {
-				fmt.Printf("[WARN] Skipped (file exists): %s\n", newName)
+				logger.Warnf("Skipped (file exists): %s", newName)
 				continue
 			}
 
@@ -628,14 +628,14 @@ func renameCSVFiles(postfix, dir string, dryRun bool) error {
 	}
 
 	// 预览模式
-	if dryRun {
+	if previewOnly {
 		if len(toRename) == 0 {
-			fmt.Println("[PREVIEW] No files to rename")
+			logger.Info("No files to rename")
 			return nil
 		}
-		fmt.Printf("[PREVIEW] %d files to rename:\n", len(toRename))
+		logger.Infof("%d files to rename:", len(toRename))
 		for _, r := range toRename {
-			fmt.Printf("  %s -> %s\n", filepath.Base(r.oldPath), filepath.Base(r.newPath))
+			logger.Infof("  %s -> %s", filepath.Base(r.oldPath), filepath.Base(r.newPath))
 		}
 		return nil
 	}
@@ -644,13 +644,13 @@ func renameCSVFiles(postfix, dir string, dryRun bool) error {
 	var renamed, skipped int
 	for _, r := range toRename {
 		if err := os.Rename(r.oldPath, r.newPath); err != nil {
-			fmt.Printf("[WARN] Failed to rename: %s\n", filepath.Base(r.oldPath))
+			logger.Errorf("Failed to rename %s: %v", r.oldPath, err)
 			skipped++
 			continue
 		}
 		renamed++
 	}
 
-	fmt.Printf("[RENAME] %d files renamed, %d skipped\n", renamed, skipped)
+	logger.Infof("%d files renamed, %d skipped", renamed, skipped)
 	return nil
 }

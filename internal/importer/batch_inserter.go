@@ -18,6 +18,7 @@ type BatchInserter struct {
 	batchSize    int
 	onDuplicate  string // "replace" or "ignore"
 	stmt         *sql.Stmt
+	cachedRows   int // 缓存语句的行数（用于判断后续批次是否能复用）
 	stmtMu       sync.RWMutex
 	buildQueryMu sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
 	skippedCols  []string   // 跳过的列
@@ -98,6 +99,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 			return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 		}
 		bi.stmt = stmt
+		bi.cachedRows = 0 // 重置，等待 insertBatchSingle 更新
 		return stmt, false, nil
 	}
 
@@ -122,6 +124,15 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	}
 
 	if len(rows) <= maxRowsPerBatch {
+		// 检查缓存语句的容量（行数）是否足够
+		bi.stmtMu.RLock()
+		cachedRowsCount := bi.cachedRows
+		bi.stmtMu.RUnlock()
+
+		if cachedRowsCount > 0 && len(rows) < cachedRowsCount {
+			// 缓存语句是为 %d 行准备的，但当前批次只有 %d 行，容量不足
+			return bi.insertBatchSingle(rows, false)
+		}
 		return bi.insertBatchSingle(rows, true) // 单批次，可缓存
 	}
 
@@ -167,6 +178,15 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rows affected: %w", err)
 	}
+
+	if canCache {
+		// 更新缓存的行数
+		bi.stmtMu.Lock()
+		bi.cachedRows = len(rows)
+		bi.stmtMu.Unlock()
+	}
+	// 注意：如果 canCache=false，不更新 cachedRows，保持原值
+	// 缓存语句仍然存在（由 insertBatchSingle 关闭或保持打开）
 
 	return rowsAffected, nil
 }

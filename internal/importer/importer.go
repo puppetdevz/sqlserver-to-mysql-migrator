@@ -105,14 +105,28 @@ func (ti *TableImporter) getDBColumns(tableName string) ([]string, error) {
 	return columns, rows.Err()
 }
 
+// BuildColumnIndexMap 构建列名到索引的映射（大写键）
+func BuildColumnIndexMap(columns []string) map[string]int {
+	m := make(map[string]int, len(columns))
+	for i, col := range columns {
+		m[strings.ToUpper(col)] = i
+	}
+	return m
+}
+
+// BuildUpperColumnMap 构建大写列名到原始列名的映射
+func BuildUpperColumnMap(columns []string) map[string]string {
+	m := make(map[string]string, len(columns))
+	for _, col := range columns {
+		m[strings.ToUpper(col)] = col
+	}
+	return m
+}
+
 // buildColumnMapping 构建 CSV 列索引到有效列索引的映射
 // csvColIdx: CSV 列索引 -> -1 表示跳过该列
 func buildColumnMapping(csvHeaders []string, dbColumns []string) []int {
-	// 构建 DB 列映射（大写 -> 索引）
-	dbColMap := make(map[string]int)
-	for i, col := range dbColumns {
-		dbColMap[strings.ToUpper(col)] = i
-	}
+	dbColMap := BuildColumnIndexMap(dbColumns)
 
 	// 构建 CSV 列索引映射
 	mapping := make([]int, len(csvHeaders))
@@ -126,19 +140,9 @@ func buildColumnMapping(csvHeaders []string, dbColumns []string) []int {
 	return mapping
 }
 
-// filterRowData 根据映射过滤行数据，只保留有效的列
-func filterRowData(row []string, mapping []int) []interface{} {
-	result := make([]interface{}, 0, len(mapping))
-	for i, val := range row {
-		if mapping[i] >= 0 {
-			result = append(result, val)
-		}
-	}
-	return result
-}
-
-// filterRowDataByInterface 过滤已预处理的数据（interface{} 数组）
-func filterRowDataByInterface(row []interface{}, mapping []int) []interface{} {
+// filterRowData 过滤行数据，只保留有效的列（根据 mapping 映射）
+// 支持 []string 和 []interface{} 两种输入类型
+func filterRowData(row []any, mapping []int) []interface{} {
 	result := make([]interface{}, 0, len(mapping))
 	for i, val := range row {
 		if mapping[i] >= 0 {
@@ -318,7 +322,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 			for i, row := range batch {
 				// 先类型转换，再过滤
 				processedRow := PreprocessRow(row)
-				filteredRow := filterRowDataByInterface(processedRow, mapping)
+				filteredRow := filterRowData(processedRow, mapping)
 				processedBatch[i] = filteredRow
 			}
 

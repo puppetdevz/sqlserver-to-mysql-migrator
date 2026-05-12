@@ -45,11 +45,7 @@ func (bi *BatchInserter) GetSkippedColumns() []string {
 // dbColumns: 数据库中实际存在的列
 // tableImporter: 用于记录跳过的列
 func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []string, dbColumns []string, batchSize int, onDuplicate string) (*BatchInserter, []string) {
-	// 构建数据库列映射（大写 -> 原名）
-	dbColMap := make(map[string]string)
-	for _, col := range dbColumns {
-		dbColMap[strings.ToUpper(col)] = col
-	}
+	dbColMap := BuildUpperColumnMap(dbColumns)
 
 	// 只保留数据库中存在的列
 	var validColumns []string

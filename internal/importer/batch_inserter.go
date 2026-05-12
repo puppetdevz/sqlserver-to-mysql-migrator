@@ -108,6 +108,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 	}
+	bi.cachedRows = 0 // 不使用缓存，重置容量标记
 	return stmt, true, nil
 }
 
@@ -124,13 +125,18 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	}
 
 	if len(rows) <= maxRowsPerBatch {
-		// 检查缓存语句的容量（行数）是否足够
 		bi.stmtMu.RLock()
-		cachedRowsCount := bi.cachedRows
+		cachedCapacity := bi.cachedRows
 		bi.stmtMu.RUnlock()
 
-		if cachedRowsCount > 0 && len(rows) < cachedRowsCount {
-			// 缓存语句是为 %d 行准备的，但当前批次只有 %d 行，容量不足
+		if cachedCapacity > 0 && len(rows) < cachedCapacity {
+			// cached stmt expects more placeholders than we have rows — close old stmt and create new one
+			bi.stmtMu.Lock()
+			if bi.stmt != nil {
+				bi.stmt.Close()
+				bi.stmt = nil
+			}
+			bi.stmtMu.Unlock()
 			return bi.insertBatchSingle(rows, false)
 		}
 		return bi.insertBatchSingle(rows, true) // 单批次，可缓存
@@ -180,14 +186,10 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 	}
 
 	if canCache {
-		// 更新缓存的行数
 		bi.stmtMu.Lock()
 		bi.cachedRows = len(rows)
 		bi.stmtMu.Unlock()
 	}
-	// 注意：如果 canCache=false，不更新 cachedRows，保持原值
-	// 缓存语句仍然存在（由 insertBatchSingle 关闭或保持打开）
-
 	return rowsAffected, nil
 }
 

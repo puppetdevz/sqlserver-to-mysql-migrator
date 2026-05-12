@@ -19,11 +19,14 @@ import (
 )
 
 var (
-	configPath = flag.String("config", "configs/config.yaml", "配置文件路径")
-	resume     = flag.Bool("resume", false, "断点续传模式")
-	tables     = flag.String("tables", "", "仅导入指定表（逗号分隔）")
-	createOnly = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
-	version    = flag.Bool("version", false, "显示版本信息")
+	configPath     = flag.String("config", "configs/config.yaml", "配置文件路径")
+	resume         = flag.Bool("resume", false, "断点续传模式")
+	tables         = flag.String("tables", "", "仅导入指定表（逗号分隔）")
+	createOnly     = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
+	version        = flag.Bool("version", false, "显示版本信息")
+	removePostfix  = flag.String("remove-postfix", "", "移除 CSV 文件名的指定后缀")
+	dryRun         = flag.Bool("dry-run", false, "预览模式，不实际执行")
+	targetDir      = flag.String("target", "", "目标目录路径")
 )
 
 const (

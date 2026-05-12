@@ -81,17 +81,21 @@ func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []st
 // canCache: 是否使用缓存（拆分批次不缓存，避免占位符数量不匹配）
 func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, error) {
 	if canCache {
-		bi.stmtMu.RLock()
-		if bi.stmt != nil {
-			bi.stmtMu.RUnlock()
-			return bi.stmt, false, nil
-		}
-		bi.stmtMu.RUnlock()
-
 		bi.stmtMu.Lock()
 		defer bi.stmtMu.Unlock()
+
+		// 如果有缓存的 statement，检查 query 是否匹配
 		if bi.stmt != nil {
-			return bi.stmt, false, nil
+			// 通过占位符数量判断 query 是否相同
+			cachedPlaceholders := bi.cachedRows * len(bi.columns)
+			newPlaceholders := strings.Count(query, "?")
+			if cachedPlaceholders == newPlaceholders {
+				// query 相同，可以复用
+				return bi.stmt, false, nil
+			}
+			// query 不同，关闭旧 statement，使用新 query
+			bi.stmt.Close()
+			bi.stmt = nil
 		}
 
 		stmt, err := bi.db.Prepare(query)

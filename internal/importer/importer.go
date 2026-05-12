@@ -19,6 +19,7 @@ const (
 	maxRetries   = 3
 	retryDelayMs = 100
 	bufferSize   = 10 // 流水线缓冲区大小
+	bom          = "\uFEFF" // UTF-8 BOM 字符
 )
 
 // TableImporter 表数据导入器
@@ -153,29 +154,72 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	reader.LazyQuotes = true
 	reader.TrimLeadingSpace = true
 
-	// 读取表头
-	headers, err := reader.Read()
-	if err != nil {
-		file.Close()
-		diag := &ImportDiagnostic{
-			TableName:   ti.tableName,
-			ErrorType:   ErrorTypeEOF,
-			ErrorDetail: fmt.Sprintf("failed to read CSV header (%v)", err),
-			CSVPath:     ti.csvPath,
-		}
-		return nil, fmt.Errorf("failed to read CSV header: %w", err), diag
-	}
-	// 清理表头（移除 BOM、空格等）
-	for i := range headers {
-		headers[i] = strings.TrimSpace(headers[i])
-		headers[i] = strings.TrimPrefix(headers[i], "\ufeff")
+	// 获取数据库列（提前获取，用于无表头模式校验）
+	dbColumns, dbErr := ti.getDBColumns(actualTableName)
+	if dbErr != nil {
+		logger.Warnf("Failed to get DB columns for %s: %v", actualTableName, dbErr)
 	}
 
-	// 获取数据库中实际的列
-	dbColumns, err := ti.getDBColumns(actualTableName)
-	if err != nil {
-		logger.Warnf("Failed to get DB columns for %s: %v", actualTableName, err)
-		// 回退到使用 CSV 列
+	// 根据配置决定是否读取表头
+	var headers []string
+	var firstRow []string // 无表头模式的第一行数据
+
+	if ti.cfg.Source.CSVHasHeader {
+		// 有表头模式：读取第一行作为表头
+		var err error
+		headers, err = reader.Read()
+		if err != nil {
+			file.Close()
+			diag := &ImportDiagnostic{
+				TableName:   ti.tableName,
+				ErrorType:   ErrorTypeEOF,
+				ErrorDetail: fmt.Sprintf("failed to read CSV header (%v)", err),
+				CSVPath:     ti.csvPath,
+			}
+			return nil, fmt.Errorf("failed to read CSV header: %w", err), diag
+		}
+		// 清理表头（移除 BOM、空格等）
+		for i := range headers {
+			headers[i] = strings.TrimSpace(headers[i])
+			headers[i] = strings.TrimPrefix(headers[i], bom)
+		}
+	} else {
+		// 无表头模式：读取第一行数据，验证列数
+		var err error
+		firstRow, err = reader.Read()
+		if err == io.EOF {
+			file.Close()
+			return &ImportResult{ProcessedRows: 0, InsertedRows: 0, ErrorCount: 0}, nil, nil
+		}
+		if err != nil {
+			file.Close()
+			diag := &ImportDiagnostic{
+				TableName:   ti.tableName,
+				ErrorType:   ErrorTypeEOF,
+				ErrorDetail: fmt.Sprintf("failed to read first row (%v)", err),
+				CSVPath:     ti.csvPath,
+			}
+			return nil, fmt.Errorf("failed to read first row: %w", err), diag
+		}
+
+		// 使用提前获取的 dbColumns
+		if dbColumns == nil {
+			return nil, fmt.Errorf("failed to get DB columns"), nil
+		}
+
+		// 严格校验列数
+		if len(firstRow) != len(dbColumns) {
+			file.Close()
+			return nil, fmt.Errorf("column count mismatch: CSV has %d columns, DB has %d",
+				len(firstRow), len(dbColumns)), nil
+		}
+
+		// 无表头模式：使用数据库列名作为 headers（用于 BatchInserter），firstRow 作为第一行数据
+		headers = dbColumns
+	}
+
+	// 如果 dbColumns 未获取（可能是上面的错误分支），使用 headers 作为 fallback
+	if dbColumns == nil {
 		dbColumns = headers
 	}
 
@@ -208,7 +252,18 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	}
 
 	// 构建 CSV 列索引到有效列的映射（用于筛选数据）
-	mapping := buildColumnMapping(headers, dbColumns)
+	var mapping []int
+	if ti.cfg.Source.CSVHasHeader {
+		// 有表头模式：按列名匹配
+		mapping = buildColumnMapping(headers, dbColumns)
+	} else {
+		// 无表头模式：按位置顺序映射，CSV[i] -> DB[i]
+		mapping = make([]int, len(headers))
+		for i := range mapping {
+			mapping[i] = i
+		}
+		logger.Infof("Importing CSV without header for table %s: %d columns", ti.tableName, len(headers))
+	}
 
 	// 建立流水线：CSV读取 -> 预处理 -> 数据库插入
 	type batchData struct {
@@ -228,23 +283,30 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 
 	// 启动 CSV 读取 goroutine
 	wg.Add(1)
-	go func() {
+	go func(firstData []string) {
 		defer wg.Done()
 		defer close(batchChan)
 
 		for {
-			// 读取一批数据
 			var batch [][]string
-			for i := 0; i < ti.cfg.Migration.BatchSize; i++ {
-				row, err := reader.Read()
-				if err == io.EOF {
-					break
+
+			if firstData != nil {
+				// 无表头模式：先处理 firstData，再继续读取
+				batch = append(batch, firstData)
+				firstData = nil // 置空，后续从 reader 读取
+			} else {
+				// 读取一批数据
+				for i := 0; i < ti.cfg.Migration.BatchSize; i++ {
+					row, err := reader.Read()
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						logger.Warnf("Failed to read row in %s: %v", ti.tableName, err)
+						continue
+					}
+					batch = append(batch, row)
 				}
-				if err != nil {
-					logger.Warnf("Failed to read row in %s: %v", ti.tableName, err)
-					continue
-				}
-				batch = append(batch, row)
 			}
 
 			if len(batch) == 0 {
@@ -267,7 +329,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 				return
 			}
 		}
-	}()
+	}(firstRow) // 无表头模式传递 firstRow，有表头模式传递 nil
 
 	// 启动数据库写入 goroutine
 	var lastErr error

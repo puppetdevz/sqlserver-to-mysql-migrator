@@ -70,7 +70,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: --target is required when using --remove-postfix")
 			os.Exit(1)
 		}
-		// 初始化日志（用于 renameCSVFiles 输出）
 		if err := logger.Init("INFO", "", true, 0, 0, 0); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 			os.Exit(1)
@@ -616,9 +615,18 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 }
 
 // renameCSVFiles 批量重命名 CSV 文件
-func renameCSVFiles(postfix, dir string, previewOnly bool) error {
+func renameCSVFiles(postfix, dir string, dryRun bool) error {
 	if postfix == "" || dir == "" {
 		return fmt.Errorf("postfix and target directory are required")
+	}
+
+	// 验证目录存在且为目录
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("target directory does not exist: %s", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("target is not a directory: %s", dir)
 	}
 
 	// 获取目录下所有 CSV 文件
@@ -631,7 +639,6 @@ func renameCSVFiles(postfix, dir string, previewOnly bool) error {
 
 	for _, filePath := range files {
 		fileName := filepath.Base(filePath)
-		// 去掉 .csv 扩展名后检查是否以后缀结尾
 		nameWithoutExt := strings.TrimSuffix(fileName, ".csv")
 		if strings.HasSuffix(nameWithoutExt, postfix) {
 			newName := strings.TrimSuffix(nameWithoutExt, postfix) + ".csv"
@@ -648,7 +655,7 @@ func renameCSVFiles(postfix, dir string, previewOnly bool) error {
 	}
 
 	// 预览模式
-	if previewOnly {
+	if dryRun {
 		if len(toRename) == 0 {
 			logger.Info("No files to rename")
 			return nil

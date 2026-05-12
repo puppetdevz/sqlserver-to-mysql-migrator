@@ -596,3 +596,61 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 
 	logger.Warn("See migration.log for detailed error information")
 }
+
+// renameCSVFiles 批量重命名 CSV 文件
+func renameCSVFiles(postfix, dir string, dryRun bool) error {
+	if postfix == "" || dir == "" {
+		return fmt.Errorf("postfix and target directory are required")
+	}
+
+	// 获取目录下所有 CSV 文件
+	files, err := filepath.Glob(filepath.Join(dir, "*.csv"))
+	if err != nil {
+		return fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	var toRename []struct{ oldPath, newPath string }
+
+	for _, filePath := range files {
+		fileName := filepath.Base(filePath)
+		if strings.HasSuffix(fileName, postfix) {
+			newName := strings.TrimSuffix(fileName, postfix)
+			newPath := filepath.Join(dir, newName)
+
+			// 检查目标文件是否已存在
+			if _, err := os.Stat(newPath); err == nil {
+				fmt.Printf("[WARN] Skipped (file exists): %s\n", newName)
+				continue
+			}
+
+			toRename = append(toRename, struct{ oldPath, newPath string }{filePath, newPath})
+		}
+	}
+
+	// 预览模式
+	if dryRun {
+		if len(toRename) == 0 {
+			fmt.Println("[PREVIEW] No files to rename")
+			return nil
+		}
+		fmt.Printf("[PREVIEW] %d files to rename:\n", len(toRename))
+		for _, r := range toRename {
+			fmt.Printf("  %s -> %s\n", filepath.Base(r.oldPath), filepath.Base(r.newPath))
+		}
+		return nil
+	}
+
+	// 执行重命名
+	var renamed, skipped int
+	for _, r := range toRename {
+		if err := os.Rename(r.oldPath, r.newPath); err != nil {
+			fmt.Printf("[WARN] Failed to rename: %s\n", filepath.Base(r.oldPath))
+			skipped++
+			continue
+		}
+		renamed++
+	}
+
+	fmt.Printf("[RENAME] %d files renamed, %d skipped\n", renamed, skipped)
+	return nil
+}

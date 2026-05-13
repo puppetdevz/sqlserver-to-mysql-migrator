@@ -229,7 +229,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	logger.Infof("Found %d CSV files", len(csvFiles))
 
 	// 导入数据（仅处理有 CSV 文件的表）
-	if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker); err != nil {
+	if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker, migrationCtx); err != nil {
 		return fmt.Errorf("failed to import data: %w", err)
 	}
 
@@ -439,7 +439,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 }
 
 // importDataWithCSVMapping 导入数据（基于 CSV 文件映射）
-func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, allowedTables []string, tracker *progress.Tracker) error {
+func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, allowedTables []string, tracker *progress.Tracker, migrationCtx *migration.MigrationContext) error {
 	// 从 CSV 文件名提取表名 -> CSV 文件路径 的映射
 	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp)
 
@@ -487,6 +487,14 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 		go func(workerID int) {
 			defer wg.Done()
 			for tableName := range tableChan {
+				// 检查是否已收到停止信号
+				select {
+				case <-migrationCtx.Context().Done():
+					logger.Warnf("[Worker %d] Migration stopped, aborting import", workerID)
+					return
+				default:
+				}
+
 				logger.Infof("[Worker %d] Processing table: %s", workerID, tableName)
 
 				// 查找 CSV 文件路径
@@ -521,6 +529,16 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					logImportDiagnostic(diag)
 					tracker.FailTable(tableName, err.Error())
 					tracker.FailPhaseItem()
+					if cfg.Migration.FastFail {
+						stopErr := fmt.Errorf("failed to import table %s: %w", tableName, err)
+						migrationCtx.Stop(stopErr)
+						resultChan <- &importer.ImportResult{
+							TableName:    tableName,
+							Success:      false,
+							ErrorMessage: stopErr.Error(),
+						}
+						return
+					}
 					resultChan <- &importer.ImportResult{
 						TableName:    tableName,
 						Success:      false,

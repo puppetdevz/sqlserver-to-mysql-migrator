@@ -14,6 +14,7 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/importer"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
 )
@@ -136,6 +137,14 @@ func main() {
 
 // runMigration 执行迁移（新流程）
 func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker) error {
+	// 创建迁移上下文
+	migrationCtx := migration.NewMigrationContext()
+	defer func() {
+		if err := migrationCtx.Err(); err != nil {
+			logger.Errorf("Migration failed: %v", err)
+		}
+	}()
+
 	// ========== 步骤 1: 表分类 ==========
 	// 解析 DDL 文件
 	ddlParser := parser.NewDDLParser(cfg.Source.DDLFile)

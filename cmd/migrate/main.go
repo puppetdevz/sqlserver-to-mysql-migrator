@@ -19,14 +19,14 @@ import (
 )
 
 var (
-	configPath     = flag.String("config", "configs/config.yaml", "配置文件路径")
-	resume         = flag.Bool("resume", false, "断点续传模式")
-	tables         = flag.String("tables", "", "仅导入指定表（逗号分隔）")
-	createOnly     = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
-	version        = flag.Bool("version", false, "显示版本信息")
-	removePostfix  = flag.String("remove-postfix", "", "移除 CSV 文件名的指定后缀")
-	dryRun         = flag.Bool("dry-run", false, "预览模式，不实际执行")
-	targetDir      = flag.String("target", "", "目标目录路径")
+	configPath    = flag.String("config", "configs/config.yaml", "配置文件路径")
+	resume        = flag.Bool("resume", false, "断点续传模式")
+	tables        = flag.String("tables", "", "仅导入指定表（逗号分隔）")
+	createOnly    = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
+	version       = flag.Bool("version", false, "显示版本信息")
+	removePostfix = flag.String("remove-postfix", "", "移除 CSV 文件名的指定后缀")
+	dryRun        = flag.Bool("dry-run", false, "预览模式，不实际执行")
+	targetDir     = flag.String("target", "", "目标目录路径")
 )
 
 const (
@@ -169,6 +169,9 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		allTableNames = excludeTables(allTableNames, completedTables)
 	}
 
+	tracker.SetPlannedTotalTables(len(allTableNames))
+	logger.Infof("Overall migration target: %d tables", len(allTableNames))
+
 	// 分类表（已存在 vs 缺失）
 	inspector := database.NewInspector(conn)
 	classification, err := inspector.ClassifyTables(allTableNames)
@@ -191,6 +194,9 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 
 	// 如果仅创建表，则退出
 	if *createOnly {
+		if err := finalizeCreateOnlyProgress(tracker, classification.ExistingTables, classification.MissingTables, cfg.Migration.CreateMissingTables); err != nil {
+			logger.Warnf("Failed to finalize create-only progress: %v", err)
+		}
 		logger.Info("Create tables only mode: skipping data import")
 		return nil
 	}
@@ -265,9 +271,8 @@ func excludeTables(allTables []string, excludedTables []string) []string {
 func truncateExistingTables(conn *database.Connection, existingTables []string, tracker *progress.Tracker) error {
 	logger.Infof("Truncating %d existing tables...", len(existingTables))
 
-	progressInfo := tracker.GetProgress()
-	tracker.SetSessionStartCount(len(existingTables))
-	tracker.SetSessionStartCompleted(progressInfo.CompletedCount)
+	tracker.StartPhase("truncate-existing-tables", len(existingTables))
+	defer tracker.ClearPhase()
 
 	successCount := 0
 	failCount := 0
@@ -275,8 +280,10 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 	for i, tableName := range existingTables {
 		if err := conn.TruncateTable(tableName); err != nil {
 			logger.Warnf("Failed to truncate table %s: %v", tableName, err)
+			tracker.FailPhaseItem()
 			failCount++
 		} else {
+			tracker.CompletePhaseItem()
 			successCount++
 		}
 
@@ -299,11 +306,8 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 func createAndTrackTables(conn *database.Connection, missingTables []string, allDDLs map[string]*parser.TableDDL, tracker *progress.Tracker) error {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
-	progressInfo := tracker.GetProgress()
-	tracker.SetSessionStartCount(len(missingTables))
-	tracker.SetSessionStartCompleted(progressInfo.CompletedCount)
-	logger.Infof("Table creation progress tracking: %d tables to process, %d already completed",
-		len(missingTables), progressInfo.CompletedCount)
+	tracker.StartPhase("create-missing-tables", len(missingTables))
+	defer tracker.ClearPhase()
 
 	// 创建转换器
 	tableConverter := converter.NewTableConverter()
@@ -314,6 +318,7 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 	var failedTableNames []string
 
 	for _, tableName := range missingTables {
+		tracker.StartTable(tableName, "", false)
 		upperTableName := strings.ToUpper(tableName)
 		tableDDL, ok := allDDLs[upperTableName]
 
@@ -333,6 +338,7 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 			}
 			logger.Warnf("Table DDL not found: %s (attempted: %s)", tableName, attemptedNames)
 			tracker.SkipTable(tableName, fmt.Sprintf("DDL not found (attempted: %s)", attemptedNames))
+			tracker.SkipPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
 			continue
@@ -343,6 +349,7 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 		if err != nil {
 			logger.Errorf("Failed to convert DDL for table %s: %v", tableName, err)
 			tracker.FailTable(tableName, fmt.Sprintf("DDL conversion failed: %v", err))
+			tracker.FailPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
 			continue
@@ -352,13 +359,23 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 		if err := conn.ExecuteDDL(mysqlDDL); err != nil {
 			logger.Errorf("Failed to create table %s: %v", tableName, err)
 			tracker.FailTable(tableName, fmt.Sprintf("Table creation failed: %v", err))
+			tracker.FailPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
 			continue
 		}
 
 		logger.Infof("Table created: %s", tableName)
-		tracker.CompleteTable(tableName, 0, 0, 0)
+		if *createOnly {
+			if err := tracker.CompleteTable(tableName, 0, 0, 0); err != nil {
+				logger.Warnf("Failed to mark table %s as completed: %v", tableName, err)
+			}
+		} else {
+			if err := tracker.MarkTableCreated(tableName); err != nil {
+				logger.Warnf("Failed to mark table %s as created: %v", tableName, err)
+			}
+		}
+		tracker.CompletePhaseItem()
 		successCount++
 	}
 
@@ -410,10 +427,8 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 
 	logger.Infof("Starting data import for %d tables (with CSV files)...", len(tablesToImport))
 
-	// 设置进度跟踪
-	progressInfo := tracker.GetProgress()
-	tracker.SetSessionStartCount(len(tablesToImport))
-	tracker.SetSessionStartCompleted(progressInfo.CompletedCount)
+	tracker.StartPhase("import-data", len(tablesToImport))
+	defer tracker.ClearPhase()
 
 	// 创建数据导入器
 	dataImporter := importer.NewDataImporter(conn, cfg)
@@ -439,6 +454,10 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					_, _, diag := dataImporter.FindCSVFile(tableName)
 					logImportDiagnostic(diag)
 					// CSV_NOT_FOUND 是正常情况（数据不存在），不记为失败
+					if err := tracker.SkipTable(tableName, "CSV file not found"); err != nil {
+						logger.Warnf("[Worker %d] Failed to mark table %s as skipped: %v", workerID, tableName, err)
+					}
+					tracker.SkipPhaseItem()
 					resultChan <- &importer.ImportResult{
 						TableName:     tableName,
 						Success:       true, // CSV不存在不算失败，只是没有数据
@@ -459,6 +478,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					logger.Errorf("[Worker %d] Failed to import table %s: %v", workerID, tableName, err)
 					logImportDiagnostic(diag)
 					tracker.FailTable(tableName, err.Error())
+					tracker.FailPhaseItem()
 					resultChan <- &importer.ImportResult{
 						TableName:    tableName,
 						Success:      false,
@@ -469,12 +489,18 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 
 				if result.Success {
 					logger.Infof("[Worker %d] Table imported: %s (%d rows)", workerID, tableName, result.InsertedRows)
-					tracker.CompleteTable(tableName, result.InsertedRows, 0, 0)
+					if err := tracker.CompleteTable(tableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
+						logger.Warnf("[Worker %d] Failed to mark table %s as completed: %v", workerID, tableName, err)
+					}
+					tracker.CompletePhaseItem()
 					resultChan <- result
 				} else {
 					logger.Warnf("[Worker %d] Table partially imported: %s (%d rows, %d errors)",
 						workerID, tableName, result.InsertedRows, result.ErrorCount)
-					tracker.CompleteTable(tableName, result.InsertedRows, 0, 0)
+					if err := tracker.FailTable(tableName, fmt.Sprintf("partial import: %d row errors", result.ErrorCount)); err != nil {
+						logger.Warnf("[Worker %d] Failed to mark table %s as failed: %v", workerID, tableName, err)
+					}
+					tracker.CompletePhaseItem()
 					resultChan <- result
 				}
 			}
@@ -521,6 +547,28 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	if failCount > 0 {
 		return fmt.Errorf("%d tables failed to import", failCount)
 	}
+	return nil
+}
+
+func finalizeCreateOnlyProgress(tracker *progress.Tracker, existingTables, missingTables []string, createMissingTables bool) error {
+	for _, tableName := range existingTables {
+		if err := tracker.SkipTable(tableName, "table already exists"); err != nil {
+			return fmt.Errorf("mark existing table %s as skipped: %w", tableName, err)
+		}
+	}
+
+	if !createMissingTables {
+		for _, tableName := range missingTables {
+			state := tracker.GetTableState(tableName)
+			if state != nil && state.Status == progress.StatusCompleted {
+				continue
+			}
+			if err := tracker.SkipTable(tableName, "table creation disabled"); err != nil {
+				return fmt.Errorf("mark missing table %s as skipped: %w", tableName, err)
+			}
+		}
+	}
+
 	return nil
 }
 

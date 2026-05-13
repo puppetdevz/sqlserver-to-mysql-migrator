@@ -56,8 +56,6 @@ func loadOrCreateState(store *SQLiteStore) (*MigrationState, error) {
 	// 重建状态
 	state := NewMigrationState()
 	state.Tables = states
-	state.TotalTables = len(states)
-	state.updateCounts()
 
 	logger.Infof("Loaded existing state: %d tables", len(states))
 
@@ -82,6 +80,7 @@ func (t *Tracker) StartTable(tableName string, csvPath string, tableExists bool)
 	if state == nil {
 		state = t.state.AddTable(tableName)
 	}
+	t.state.TrackRunTable(tableName)
 
 	state.Status = StatusInProgress
 	state.StartTime = time.Now()
@@ -100,6 +99,7 @@ func (t *Tracker) CompleteTable(tableName string, processedRows, insertedRows, e
 	if state == nil {
 		return fmt.Errorf("table state not found: %s", tableName)
 	}
+	t.state.TrackRunTable(tableName)
 
 	state.Status = StatusCompleted
 	state.ProcessedRows = processedRows
@@ -113,6 +113,24 @@ func (t *Tracker) CompleteTable(tableName string, processedRows, insertedRows, e
 	return t.store.SaveTableState(state)
 }
 
+// MarkTableCreated 记录建表成功，但不推进 overall 最终完成计数
+func (t *Tracker) MarkTableCreated(tableName string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state := t.state.GetTable(tableName)
+	if state == nil {
+		return fmt.Errorf("table state not found: %s", tableName)
+	}
+	t.state.TrackRunTable(tableName)
+
+	state.TableCreated = true
+	state.EndTime = time.Now()
+	state.DurationMs = state.EndTime.Sub(state.StartTime).Milliseconds()
+
+	return t.store.SaveTableState(state)
+}
+
 // FailTable 标记表处理失败
 func (t *Tracker) FailTable(tableName string, errorMessage string) error {
 	t.mu.Lock()
@@ -122,6 +140,7 @@ func (t *Tracker) FailTable(tableName string, errorMessage string) error {
 	if state == nil {
 		state = t.state.AddTable(tableName)
 	}
+	t.state.TrackRunTable(tableName)
 
 	state.Status = StatusFailed
 	state.ErrorMessage = errorMessage
@@ -142,6 +161,7 @@ func (t *Tracker) SkipTable(tableName string, reason string) error {
 	if state == nil {
 		state = t.state.AddTable(tableName)
 	}
+	t.state.TrackRunTable(tableName)
 
 	state.Status = StatusSkipped
 	state.ErrorMessage = reason
@@ -171,43 +191,87 @@ func (t *Tracker) GetProgress() ProgressInfo {
 	defer t.mu.RUnlock()
 
 	return ProgressInfo{
-		TotalTables:           t.state.TotalTables,
-		CompletedCount:        t.state.CompletedCount,
-		FailedCount:          t.state.FailedCount,
-		SkippedCount:         t.state.SkippedCount,
-		Progress:              t.state.GetProgress(),
-		SessionProgress:       t.state.GetSessionProgress(),
-		SessionStartCount:     t.state.SessionStartCount,
-		SessionStartCompleted: t.state.SessionStartCompleted,
-		IsCompleted:           t.state.IsCompleted(),
+		TotalTables:    t.state.TotalTables,
+		CompletedCount: t.state.CompletedCount,
+		FailedCount:    t.state.FailedCount,
+		SkippedCount:   t.state.SkippedCount,
+		Progress:       t.state.GetProgress(),
+		CurrentPhase:   t.state.CurrentPhase,
+		PhaseTotal:     t.state.PhaseTotal,
+		PhaseCompleted: t.state.PhaseCompleted,
+		PhaseFailed:    t.state.PhaseFailed,
+		PhaseSkipped:   t.state.PhaseSkipped,
+		PhaseProgress:  t.state.GetPhaseProgress(),
+		IsCompleted:    t.state.IsCompleted(),
 	}
 }
 
-// SetSessionStartCount 设置当前会话的初始表数量
-func (t *Tracker) SetSessionStartCount(count int) {
+// StartPhase 开始新的阶段统计
+func (t *Tracker) StartPhase(name string, total int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.state.SessionStartCount = count
+
+	t.state.CurrentPhase = name
+	t.state.PhaseTotal = total
+	t.state.PhaseCompleted = 0
+	t.state.PhaseFailed = 0
+	t.state.PhaseSkipped = 0
 }
 
-// SetSessionStartCompleted 设置当前会话开始时已完成的表数量
-func (t *Tracker) SetSessionStartCompleted(count int) {
+// CompletePhaseItem 增加阶段完成计数
+func (t *Tracker) CompletePhaseItem() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.state.SessionStartCompleted = count
+	t.state.PhaseCompleted++
+}
+
+// FailPhaseItem 增加阶段失败计数
+func (t *Tracker) FailPhaseItem() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state.PhaseFailed++
+}
+
+// SkipPhaseItem 增加阶段跳过计数
+func (t *Tracker) SkipPhaseItem() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state.PhaseSkipped++
+}
+
+// ClearPhase 清空当前阶段统计
+func (t *Tracker) ClearPhase() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.state.CurrentPhase = ""
+	t.state.PhaseTotal = 0
+	t.state.PhaseCompleted = 0
+	t.state.PhaseFailed = 0
+	t.state.PhaseSkipped = 0
+}
+
+// SetPlannedTotalTables 设置本次运行计划处理的总表数
+func (t *Tracker) SetPlannedTotalTables(total int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state.ResetRunCounts(total)
 }
 
 // ProgressInfo 进度信息
 type ProgressInfo struct {
-	TotalTables           int
-	CompletedCount        int
-	FailedCount           int
-	SkippedCount          int
-	Progress              float64
-	SessionProgress       float64
-	SessionStartCount     int
-	SessionStartCompleted int
-	IsCompleted           bool
+	TotalTables    int
+	CompletedCount int
+	FailedCount    int
+	SkippedCount   int
+	Progress       float64
+	CurrentPhase   string
+	PhaseTotal     int
+	PhaseCompleted int
+	PhaseFailed    int
+	PhaseSkipped   int
+	PhaseProgress  float64
+	IsCompleted    bool
 }
 
 // StartProgressReporter 启动进度报告器
@@ -229,21 +293,18 @@ func (t *Tracker) StartProgressReporter(interval time.Duration) {
 // reportProgress 报告进度
 func (t *Tracker) reportProgress() {
 	info := t.GetProgress()
+	overallProcessed := info.CompletedCount + info.FailedCount + info.SkippedCount
 
-	// 计算当前会话已处理的表数量（相对于会话开始时的总数）
-	processedInSession := info.CompletedCount + info.FailedCount + info.SkippedCount
-
-	// 如果设置了会话开始时的表数量，显示会话进度
-	if info.SessionStartCount > 0 {
-		logger.Infof("Progress: %.2f%% [Session: %d/%d tables] (Total: %d/%d) - Completed: %d, Failed: %d, Skipped: %d",
-			info.SessionProgress, processedInSession, info.SessionStartCount,
-			info.CompletedCount+info.FailedCount+info.SkippedCount, info.TotalTables,
-			info.CompletedCount, info.FailedCount, info.SkippedCount)
-	} else {
-		logger.Infof("Progress: %.2f%% (%d/%d tables) - Completed: %d, Failed: %d, Skipped: %d",
-			info.Progress, info.CompletedCount+info.FailedCount+info.SkippedCount, info.TotalTables,
-			info.CompletedCount, info.FailedCount, info.SkippedCount)
+	if info.CurrentPhase != "" && info.PhaseTotal > 0 {
+		phaseProcessed := info.PhaseCompleted + info.PhaseFailed + info.PhaseSkipped
+		logger.Infof("Phase(%s): %.2f%% (%d/%d) - Completed: %d, Failed: %d, Skipped: %d",
+			info.CurrentPhase, info.PhaseProgress, phaseProcessed, info.PhaseTotal,
+			info.PhaseCompleted, info.PhaseFailed, info.PhaseSkipped)
 	}
+
+	logger.Infof("Overall: %.2f%% (%d/%d tables) - Completed: %d, Failed: %d, Skipped: %d",
+		info.Progress, overallProcessed, info.TotalTables,
+		info.CompletedCount, info.FailedCount, info.SkippedCount)
 }
 
 // PrintSummary 打印摘要
@@ -259,8 +320,9 @@ func (t *Tracker) PrintSummary() {
 
 	if t.state.FailedCount > 0 {
 		logger.Warn("Failed tables:")
-		for _, state := range t.state.Tables {
-			if state.Status == StatusFailed {
+		for tableName := range t.state.RunTableNames {
+			state, ok := t.state.Tables[tableName]
+			if ok && state.Status == StatusFailed {
 				logger.Warnf("  - %s: %s", state.TableName, state.ErrorMessage)
 			}
 		}
@@ -268,8 +330,9 @@ func (t *Tracker) PrintSummary() {
 
 	if t.state.SkippedCount > 0 {
 		logger.Info("Skipped tables:")
-		for _, state := range t.state.Tables {
-			if state.Status == StatusSkipped {
+		for tableName := range t.state.RunTableNames {
+			state, ok := t.state.Tables[tableName]
+			if ok && state.Status == StatusSkipped {
 				logger.Infof("  - %s: %s", state.TableName, state.ErrorMessage)
 			}
 		}

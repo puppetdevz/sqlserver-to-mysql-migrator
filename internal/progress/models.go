@@ -15,32 +15,38 @@ const (
 
 // TableState 表迁移状态
 type TableState struct {
-	TableName      string          `json:"table_name"`
-	Status         MigrationStatus `json:"status"`
-	TotalRows      int64           `json:"total_rows"`
-	ProcessedRows  int64           `json:"processed_rows"`
-	InsertedRows   int64           `json:"inserted_rows"`
-	ErrorCount     int64           `json:"error_count"`
-	ErrorMessage   string          `json:"error_message,omitempty"`
-	StartTime      time.Time       `json:"start_time"`
-	EndTime        time.Time       `json:"end_time,omitempty"`
-	DurationMs     int64           `json:"duration_ms"`
-	CSVPath        string          `json:"csv_path"`
-	TableExists    bool            `json:"table_exists"`
-	TableCreated   bool            `json:"table_created"`
+	TableName     string          `json:"table_name"`
+	Status        MigrationStatus `json:"status"`
+	TotalRows     int64           `json:"total_rows"`
+	ProcessedRows int64           `json:"processed_rows"`
+	InsertedRows  int64           `json:"inserted_rows"`
+	ErrorCount    int64           `json:"error_count"`
+	ErrorMessage  string          `json:"error_message,omitempty"`
+	StartTime     time.Time       `json:"start_time"`
+	EndTime       time.Time       `json:"end_time,omitempty"`
+	DurationMs    int64           `json:"duration_ms"`
+	CSVPath       string          `json:"csv_path"`
+	TableExists   bool            `json:"table_exists"`
+	TableCreated  bool            `json:"table_created"`
 }
 
 // MigrationState 整体迁移状态
 type MigrationState struct {
-	StartTime          time.Time              `json:"start_time"`
-	EndTime            time.Time              `json:"end_time,omitempty"`
-	TotalTables        int                    `json:"total_tables"`       // 总表数（所有状态）
-	CompletedCount     int                    `json:"completed_count"`
-	FailedCount        int                    `json:"failed_count"`
-	SkippedCount       int                    `json:"skipped_count"`
-	Tables             map[string]*TableState `json:"tables"`
-	SessionStartCount  int                    `json:"session_start_count"` // 当前会话开始时的表数量
-	SessionStartCompleted int                 `json:"session_start_completed"` // 当前会话开始时已完成的表数量
+	StartTime      time.Time              `json:"start_time"`
+	EndTime        time.Time              `json:"end_time,omitempty"`
+	TotalTables    int                    `json:"total_tables"` // 本次运行计划处理的总表数
+	CompletedCount int                    `json:"completed_count"` // 本次运行已完成表数
+	FailedCount    int                    `json:"failed_count"` // 本次运行失败表数
+	SkippedCount   int                    `json:"skipped_count"` // 本次运行跳过表数
+	Tables         map[string]*TableState `json:"tables"`
+
+	CurrentPhase   string `json:"current_phase"`
+	PhaseTotal     int    `json:"phase_total"`
+	PhaseCompleted int    `json:"phase_completed"`
+	PhaseFailed    int    `json:"phase_failed"`
+	PhaseSkipped   int    `json:"phase_skipped"`
+
+	RunTableNames map[string]struct{} `json:"-"`
 }
 
 // NewMigrationState 创建新的迁移状态
@@ -48,6 +54,7 @@ func NewMigrationState() *MigrationState {
 	return &MigrationState{
 		StartTime: time.Now(),
 		Tables:    make(map[string]*TableState),
+		RunTableNames: make(map[string]struct{}),
 	}
 }
 
@@ -59,7 +66,6 @@ func (ms *MigrationState) AddTable(tableName string) *TableState {
 		StartTime: time.Now(),
 	}
 	ms.Tables[tableName] = state
-	ms.TotalTables++
 	return state
 }
 
@@ -86,7 +92,11 @@ func (ms *MigrationState) updateCounts() {
 	failed := 0
 	skipped := 0
 
-	for _, state := range ms.Tables {
+	for tableName := range ms.RunTableNames {
+		state, ok := ms.Tables[tableName]
+		if !ok {
+			continue
+		}
 		switch state.Status {
 		case StatusCompleted:
 			completed++
@@ -102,6 +112,23 @@ func (ms *MigrationState) updateCounts() {
 	ms.SkippedCount = skipped
 }
 
+// ResetRunCounts 重置本次运行的 overall 统计口径
+func (ms *MigrationState) ResetRunCounts(total int) {
+	ms.TotalTables = total
+	ms.CompletedCount = 0
+	ms.FailedCount = 0
+	ms.SkippedCount = 0
+	ms.RunTableNames = make(map[string]struct{})
+}
+
+// TrackRunTable 将表纳入本次运行口径
+func (ms *MigrationState) TrackRunTable(tableName string) {
+	if ms.RunTableNames == nil {
+		ms.RunTableNames = make(map[string]struct{})
+	}
+	ms.RunTableNames[tableName] = struct{}{}
+}
+
 // IsCompleted 检查是否全部完成
 func (ms *MigrationState) IsCompleted() bool {
 	return ms.CompletedCount+ms.FailedCount+ms.SkippedCount == ms.TotalTables
@@ -115,25 +142,12 @@ func (ms *MigrationState) GetProgress() float64 {
 	return float64(ms.CompletedCount+ms.FailedCount+ms.SkippedCount) / float64(ms.TotalTables) * 100
 }
 
-// SetSessionStartCount 设置当前会话开始的表数量
-func (ms *MigrationState) SetSessionStartCount(count int) {
-	ms.SessionStartCount = count
-}
-
-// SetSessionStartCompleted 设置当前会话开始时已完成的表数量
-func (ms *MigrationState) SetSessionStartCompleted(count int) {
-	ms.SessionStartCompleted = count
-}
-
-// GetSessionProgress 获取当前会话的进度百分比
-// 计算方式：(当前已完成的表数 - 会话开始时已完成的表数) / 会话开始时的表数量
-func (ms *MigrationState) GetSessionProgress() float64 {
-	if ms.SessionStartCount == 0 {
+// GetPhaseProgress 获取当前阶段进度百分比
+func (ms *MigrationState) GetPhaseProgress() float64 {
+	if ms.PhaseTotal == 0 {
 		return 0
 	}
-	newlyCompleted := ms.CompletedCount - ms.SessionStartCompleted
-	if newlyCompleted < 0 {
-		newlyCompleted = 0
-	}
-	return float64(newlyCompleted) / float64(ms.SessionStartCount) * 100
+
+	processed := ms.PhaseCompleted + ms.PhaseFailed + ms.PhaseSkipped
+	return float64(processed) / float64(ms.PhaseTotal) * 100
 }

@@ -195,7 +195,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	// 注意：classification.MissingTables 是基于 DDL 全量表的缺失部分
 	// 这里会创建所有 DDL 中有但数据库中不存在的表
 	if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
-		if err := createAndTrackTables(conn, classification.MissingTables, allDDLs, tracker); err != nil {
+		if err := createAndTrackTables(cfg, conn, classification.MissingTables, allDDLs, tracker, migrationCtx); err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
 			// 继续执行，允许部分表创建失败
 		}
@@ -312,7 +312,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
-func createAndTrackTables(conn *database.Connection, missingTables []string, allDDLs map[string]*parser.TableDDL, tracker *progress.Tracker) error {
+func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, allDDLs map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext) error {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
 	tracker.StartPhase("create-missing-tables", len(missingTables))
@@ -327,6 +327,14 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 	var failedTableNames []string
 
 	for _, tableName := range missingTables {
+		// 检查是否已收到停止信号
+		select {
+		case <-migrationCtx.Context().Done():
+			logger.Warn("Migration stopped, aborting table creation")
+			return migrationCtx.Err()
+		default:
+		}
+
 		tracker.StartTable(tableName, "", false)
 		upperTableName := strings.ToUpper(tableName)
 		tableDDL, ok := allDDLs[upperTableName]
@@ -350,6 +358,10 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 			tracker.SkipPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
+			if cfg.Migration.FastFail {
+				migrationCtx.Stop(fmt.Errorf("table DDL not found: %s", tableName))
+				return fmt.Errorf("table DDL not found: %s", tableName)
+			}
 			continue
 		}
 
@@ -361,6 +373,10 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 			tracker.FailPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
+			if cfg.Migration.FastFail {
+				migrationCtx.Stop(fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err))
+				return fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err)
+			}
 			continue
 		}
 
@@ -371,6 +387,10 @@ func createAndTrackTables(conn *database.Connection, missingTables []string, all
 			tracker.FailPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
+			if cfg.Migration.FastFail {
+				migrationCtx.Stop(fmt.Errorf("failed to create table %s: %w", tableName, err))
+				return fmt.Errorf("failed to create table %s: %w", tableName, err)
+			}
 			continue
 		}
 

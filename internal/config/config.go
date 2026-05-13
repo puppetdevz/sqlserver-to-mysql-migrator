@@ -36,6 +36,7 @@ type TargetConfig struct {
 
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
+	FastFail             bool   `yaml:"fast_fail"`              // 遇错即停（true）或记录错误跳过（false）
 	BatchSize            int    `yaml:"batch_size"`
 	MaxWorkers           int    `yaml:"max_workers"`
 	EnableResume         bool   `yaml:"enable_resume"`

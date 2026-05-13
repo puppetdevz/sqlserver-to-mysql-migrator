@@ -214,7 +214,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	// 注意：这里 TRUNCATE 的是 classification.ExistingTables（基于 DDL 全量表）
 	// 但 classification.ExistingTables 只包含 DDL 中存在的表，不是全部已存在表
 	if len(classification.ExistingTables) > 0 {
-		if err := truncateExistingTables(conn, classification.ExistingTables, tracker); err != nil {
+		if err := truncateExistingTables(conn, classification.ExistingTables, tracker, migrationCtx, cfg); err != nil {
 			logger.Warnf("Some tables failed to truncate: %v", err)
 			// 继续执行，不阻断
 		}
@@ -277,7 +277,7 @@ func excludeTables(allTables []string, excludedTables []string) []string {
 }
 
 // truncateExistingTables 清空所有已存在的表
-func truncateExistingTables(conn *database.Connection, existingTables []string, tracker *progress.Tracker) error {
+func truncateExistingTables(conn *database.Connection, existingTables []string, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, cfg *config.Config) error {
 	logger.Infof("Truncating %d existing tables...", len(existingTables))
 
 	tracker.StartPhase("truncate-existing-tables", len(existingTables))
@@ -287,10 +287,23 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 	failCount := 0
 
 	for i, tableName := range existingTables {
+		// 检查是否已收到停止信号
+		select {
+		case <-migrationCtx.Context().Done():
+			logger.Warn("Migration stopped, aborting truncate phase")
+			return migrationCtx.Err()
+		default:
+		}
+
 		if err := conn.TruncateTable(tableName); err != nil {
 			logger.Warnf("Failed to truncate table %s: %v", tableName, err)
 			tracker.FailPhaseItem()
 			failCount++
+			if cfg.Migration.FastFail {
+				stopErr := fmt.Errorf("failed to truncate table %s: %w", tableName, err)
+				migrationCtx.Stop(stopErr)
+				return stopErr
+			}
 		} else {
 			tracker.CompletePhaseItem()
 			successCount++

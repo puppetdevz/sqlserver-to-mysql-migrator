@@ -2,75 +2,74 @@ package database
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 )
 
 // Inspector 数据库检查器
 type Inspector struct {
-	conn *Connection
+	conn         *Connection
+	tableMatcher matcher.TableNameMatcher
 }
 
 // NewInspector 创建数据库检查器
-func NewInspector(conn *Connection) *Inspector {
+func NewInspector(conn *Connection, tableMatcher matcher.TableNameMatcher) *Inspector {
 	return &Inspector{
-		conn: conn,
+		conn:         conn,
+		tableMatcher: tableMatcher,
 	}
 }
 
 // TableClassification 表分类结果
 type TableClassification struct {
-	ExistingTables   []string         // 已存在的表
-	MissingTables    []string         // 缺失的表
+	ExistingTables    []string        // 已存在的表
+	MissingTables     []string        // 缺失的表
 	ExistingTablesMap map[string]bool // 已存在表的快速查找映射
 }
 
 // ClassifyTables 分类表（已存在 vs 缺失）
 func (i *Inspector) ClassifyTables(allTableNames []string) (*TableClassification, error) {
 	// 获取目标数据库中已存在的表
-	existingTablesMap, err := i.getExistingTablesMap()
+	tables, err := i.conn.GetTableNames()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get existing tables: %w", err)
 	}
 
+	classification := classifyTableNames(allTableNames, tables, i.tableMatcher)
+
+	logger.Infof("Table classification: %d existing, %d missing, %d total",
+		len(classification.ExistingTables), len(classification.MissingTables), len(allTableNames))
+
+	return classification, nil
+}
+
+func classifyTableNames(allTableNames, existingTables []string, tableMatcher matcher.TableNameMatcher) *TableClassification {
+	existingTablesMap := make(map[string]bool)
+	for _, table := range existingTables {
+		key := tableMatcher.Key(table)
+		if existingTablesMap[key] {
+			logger.Warnf("Table name conflict under current case-sensitivity setting: %s", table)
+			continue
+		}
+		existingTablesMap[key] = true
+	}
+
 	var existing []string
 	var missing []string
-
 	for _, tableName := range allTableNames {
-		// 转换为大写进行比较（不区分大小写）
-		upperTableName := strings.ToUpper(tableName)
-		if existingTablesMap[upperTableName] {
+		if existingTablesMap[tableMatcher.Key(tableName)] {
 			existing = append(existing, tableName)
 		} else {
 			missing = append(missing, tableName)
 		}
 	}
 
-	logger.Infof("Table classification: %d existing, %d missing, %d total",
-		len(existing), len(missing), len(allTableNames))
-
 	return &TableClassification{
 		ExistingTables:    existing,
 		MissingTables:     missing,
 		ExistingTablesMap: existingTablesMap,
-	}, nil
-}
-
-// getExistingTablesMap 获取已存在表的映射（大写表名 -> true）
-func (i *Inspector) getExistingTablesMap() (map[string]bool, error) {
-	tables, err := i.conn.GetTableNames()
-	if err != nil {
-		return nil, err
 	}
-
-	tableMap := make(map[string]bool)
-	for _, table := range tables {
-		// 使用大写作为 key，实现不区分大小写的查找
-		tableMap[strings.ToUpper(table)] = true
-	}
-
-	return tableMap, nil
 }
 
 // GetTableStructure 获取表结构信息

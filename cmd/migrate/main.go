@@ -14,6 +14,7 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/importer"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
@@ -182,7 +183,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 
 	// 分类表（已存在 vs 缺失）
-	inspector := database.NewInspector(conn)
+	inspector := database.NewInspector(conn, matcher.DefaultTableNameMatcher())
 	classification, err := inspector.ClassifyTables(allTableNames)
 	if err != nil {
 		return fmt.Errorf("failed to classify tables: %w", err)

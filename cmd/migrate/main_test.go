@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
 )
 
@@ -159,5 +160,39 @@ func TestExcludeTablesCaseInsensitive(t *testing.T) {
 
 	if len(got) != 0 {
 		t.Fatalf("excludeTables() = %v, want empty", got)
+	}
+}
+
+func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *testing.T) {
+	allDDLs := map[string]*parser.TableDDL{
+		"SAMPLE_MAIN_101$": {TableName: "sample_main_101$"},
+	}
+	tableMatcher := matcher.NewTableNameMatcher(true)
+
+	tableNames := collectDDLTableNames(allDDLs)
+	if len(tableNames) != 1 || tableNames[0] != "sample_main_101$" {
+		t.Fatalf("collectDDLTableNames() = %v, want [sample_main_101$]", tableNames)
+	}
+
+	got := filterTables(tableNames, []string{"sample_main_101$"}, tableMatcher)
+	if len(got) != 1 || got[0] != "sample_main_101$" {
+		t.Fatalf("filterTables() = %v, want [sample_main_101$]", got)
+	}
+}
+
+func TestBuildDDLLookupKeepsLexicographicallyFirstConflict(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+	allDDLs := map[string]*parser.TableDDL{
+		"A": {TableName: "A"},
+		"a": {TableName: "a"},
+	}
+
+	for i := 0; i < 100; i++ {
+		lookup := buildDDLLookup(allDDLs, tableMatcher)
+
+		got := lookup[tableMatcher.Key("a")]
+		if got == nil || got.TableName != "A" {
+			t.Fatalf("buildDDLLookup() kept %v, want A", got)
+		}
 	}
 }

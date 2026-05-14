@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -160,10 +161,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	ddlLookup := buildDDLLookup(allDDLs, tableMatcher)
 
 	// 从 DDL 获取所有表名列表
-	var allTableNames []string
-	for tableName := range allDDLs {
-		allTableNames = append(allTableNames, tableName)
-	}
+	allTableNames := collectDDLTableNames(allDDLs)
 	logger.Infof("Total tables from DDL: %d", len(allTableNames))
 
 	// 如果指定了表列表，过滤
@@ -275,12 +273,31 @@ func excludeTables(allTables []string, excludedTables []string, tableMatcher mat
 	return filtered
 }
 
-func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.TableNameMatcher) map[string]*parser.TableDDL {
-	lookup := make(map[string]*parser.TableDDL, len(allDDLs))
+func collectDDLTableNames(allDDLs map[string]*parser.TableDDL) []string {
+	tableNames := make([]string, 0, len(allDDLs))
 	for _, tableDDL := range allDDLs {
 		if tableDDL == nil {
 			continue
 		}
+		tableNames = append(tableNames, tableDDL.TableName)
+	}
+	return tableNames
+}
+
+func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.TableNameMatcher) map[string]*parser.TableDDL {
+	lookup := make(map[string]*parser.TableDDL, len(allDDLs))
+	tableDDLs := make([]*parser.TableDDL, 0, len(allDDLs))
+	for _, tableDDL := range allDDLs {
+		if tableDDL == nil {
+			continue
+		}
+		tableDDLs = append(tableDDLs, tableDDL)
+	}
+	sort.Slice(tableDDLs, func(i, j int) bool {
+		return tableDDLs[i].TableName < tableDDLs[j].TableName
+	})
+
+	for _, tableDDL := range tableDDLs {
 		key := tableMatcher.Key(tableDDL.TableName)
 		if existing, ok := lookup[key]; ok {
 			logger.Warnf("DDL table name conflict under current case-sensitivity setting: %s and %s", existing.TableName, tableDDL.TableName)

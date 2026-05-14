@@ -32,6 +32,5 @@ state.db-shm
 logs/
 *.log
 
-# Harness (runtime state)
-harness-*.json
-harness-*.txt
+# Data files (large, don't need version control)
+data/

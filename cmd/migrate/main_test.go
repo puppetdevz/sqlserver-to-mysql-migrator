@@ -230,3 +230,25 @@ func TestBuildCSVTableMapCaseInsensitive(t *testing.T) {
 		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
 	}
 }
+
+func TestBuildCSVTableMapDollarTableWithTimestamp(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(true)
+	csvPath := "/tmp/TABLE__20000101000000.csv"
+
+	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+
+	if got := tableMap[tableMatcher.Key("TABLE$")]; got != csvPath {
+		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
+	}
+}
+
+func TestBuildCSVTableMapDollarTableWithTimestampCaseInsensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+	csvPath := "/tmp/table__20000101000000.csv"
+
+	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+
+	if got := tableMap[tableMatcher.Key("TABLE$")]; got != csvPath {
+		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
+	}
+}

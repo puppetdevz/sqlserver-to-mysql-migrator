@@ -677,7 +677,7 @@ func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDia
 		// $ suffix: TABLE$_TIMESTAMP → TABLE__TIMESTAMP.csv
 		if strings.HasSuffix(tableName, "$") {
 			base := strings.TrimSuffix(tableName, "$") + "__"
-			expectedFileNames = append(expectedFileNames, fmt.Sprintf("%s_%s.csv", base, ts))
+			expectedFileNames = append(expectedFileNames, fmt.Sprintf("%s%s.csv", base, ts))
 		}
 	} else {
 		expectedFileNames = append(expectedFileNames, tableName+".csv")

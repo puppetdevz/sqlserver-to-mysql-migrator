@@ -101,3 +101,57 @@ func TestFindCSVFileCaseInsensitiveDiagnosticDoesNotListEntireDirectory(t *testi
 		t.Fatalf("TriedPaths[0] basename = %q, want %q", got, "SAMPLE_MAIN_102_20000101000000.csv")
 	}
 }
+
+func TestFindCSVFileDollarTableWithTimestampCaseSensitive(t *testing.T) {
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "TABLE__20000101000000.csv")
+	if err := os.WriteFile(csvPath, []byte("id\n1\n"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	di := NewDataImporter(nil, &config.Config{
+		Source: config.SourceConfig{
+			CSVDirectory: dir,
+			CSVTimestamp: "20000101000000",
+		},
+		Migration: config.MigrationConfig{
+			TableNameCaseSensitive: boolPtr(true),
+		},
+	})
+	defer di.Close()
+
+	got, err, diag := di.FindCSVFile("TABLE$")
+	if err != nil {
+		t.Fatalf("FindCSVFile() error = %v diag=%#v", err, diag)
+	}
+	if got != csvPath {
+		t.Fatalf("FindCSVFile() = %q, want %q", got, csvPath)
+	}
+}
+
+func TestFindCSVFileDollarTableWithTimestampCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "table__20000101000000.csv")
+	if err := os.WriteFile(csvPath, []byte("id\n1\n"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	di := NewDataImporter(nil, &config.Config{
+		Source: config.SourceConfig{
+			CSVDirectory: dir,
+			CSVTimestamp: "20000101000000",
+		},
+		Migration: config.MigrationConfig{
+			TableNameCaseSensitive: boolPtr(false),
+		},
+	})
+	defer di.Close()
+
+	got, err, diag := di.FindCSVFile("TABLE$")
+	if err != nil {
+		t.Fatalf("FindCSVFile() error = %v diag=%#v", err, diag)
+	}
+	if got != csvPath {
+		t.Fatalf("FindCSVFile() = %q, want %q", got, csvPath)
+	}
+}

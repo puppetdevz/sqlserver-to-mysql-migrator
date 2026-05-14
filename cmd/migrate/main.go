@@ -695,6 +695,11 @@ func extractTableNameFromFile(fileName, timestamp string) string {
 
 	// 如果有时间戳，移除时间戳部分
 	if timestamp != "" {
+		dollarSuffix := "__" + timestamp
+		if strings.HasSuffix(name, dollarSuffix) {
+			return strings.TrimSuffix(name, dollarSuffix) + "$"
+		}
+
 		suffix := "_" + timestamp
 		if strings.HasSuffix(name, suffix) {
 			name = strings.TrimSuffix(name, suffix)

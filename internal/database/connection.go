@@ -9,17 +9,24 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 )
 
 // Connection 数据库连接封装
 type Connection struct {
 	DB *sql.DB
-	// 表名映射：大写表名 -> 实际表名（解决 MySQL 大小写不敏感问题）
+	// 表名映射：匹配器生成的表名 key -> 实际表名
 	tableNameMap map[string]string
+	tableMatcher *matcher.TableNameMatcher
 }
 
 // NewConnection 创建新的数据库连接
 func NewConnection(cfg *config.TargetConfig) (*Connection, error) {
+	return NewConnectionWithMatcher(cfg, matcher.DefaultTableNameMatcher())
+}
+
+// NewConnectionWithMatcher 使用指定表名匹配器创建新的数据库连接
+func NewConnectionWithMatcher(cfg *config.TargetConfig, tableMatcher matcher.TableNameMatcher) (*Connection, error) {
 	// 打开数据库连接
 	db, err := sql.Open("mysql", cfg.GetDSN())
 	if err != nil {
@@ -42,7 +49,15 @@ func NewConnection(cfg *config.TargetConfig) (*Connection, error) {
 
 	logger.Infof("Database connected: %s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
 
-	return &Connection{DB: db}, nil
+	return &Connection{DB: db, tableMatcher: &tableMatcher}, nil
+}
+
+func (c *Connection) matcher() matcher.TableNameMatcher {
+	if c.tableMatcher == nil {
+		defaultMatcher := matcher.DefaultTableNameMatcher()
+		c.tableMatcher = &defaultMatcher
+	}
+	return *c.tableMatcher
 }
 
 // Close 关闭数据库连接
@@ -87,11 +102,17 @@ func (c *Connection) GetTableNames() ([]string, error) {
 	return tables, nil
 }
 
-// buildTableNameMap 构建表名映射（大写 -> 实际）
+// buildTableNameMap 构建表名映射（匹配器 key -> 实际）
 func (c *Connection) buildTableNameMap(tables []string) {
 	c.tableNameMap = make(map[string]string)
+	tableMatcher := c.matcher()
 	for _, t := range tables {
-		c.tableNameMap[strings.ToUpper(t)] = t
+		key := tableMatcher.Key(t)
+		if existing, ok := c.tableNameMap[key]; ok {
+			logger.Warnf("Duplicate table name match key %q: keeping %q, ignoring %q", key, existing, t)
+			continue
+		}
+		c.tableNameMap[key] = t
 	}
 }
 
@@ -115,7 +136,7 @@ func (c *Connection) GetActualTableName(tableName string) string {
 			return tableName
 		}
 	}
-	if actual, ok := c.tableNameMap[strings.ToUpper(tableName)]; ok {
+	if actual, ok := c.tableNameMap[c.matcher().Key(tableName)]; ok {
 		return actual
 	}
 	return tableName
@@ -136,7 +157,7 @@ func (c *Connection) TableExists(tableName string) (bool, error) {
 	}
 
 	// 使用映射检查表是否存在
-	_, exists := c.tableNameMap[strings.ToUpper(tableName)]
+	_, exists := c.tableNameMap[c.matcher().Key(tableName)]
 	return exists, nil
 }
 
@@ -195,11 +216,16 @@ func (c *Connection) BeginTx() (*sql.Tx, error) {
 
 // RetryConnect 重试连接数据库
 func RetryConnect(cfg *config.TargetConfig, maxRetries int) (*Connection, error) {
+	return RetryConnectWithMatcher(cfg, maxRetries, matcher.DefaultTableNameMatcher())
+}
+
+// RetryConnectWithMatcher 使用指定表名匹配器重试连接数据库
+func RetryConnectWithMatcher(cfg *config.TargetConfig, maxRetries int, tableMatcher matcher.TableNameMatcher) (*Connection, error) {
 	var conn *Connection
 	var err error
 
 	for i := 0; i < maxRetries; i++ {
-		conn, err = NewConnection(cfg)
+		conn, err = NewConnectionWithMatcher(cfg, tableMatcher)
 		if err == nil {
 			return conn, nil
 		}

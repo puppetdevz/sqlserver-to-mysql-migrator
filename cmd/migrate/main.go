@@ -281,6 +281,7 @@ func collectDDLTableNames(allDDLs map[string]*parser.TableDDL) []string {
 		}
 		tableNames = append(tableNames, tableDDL.TableName)
 	}
+	sort.Strings(tableNames)
 	return tableNames
 }
 

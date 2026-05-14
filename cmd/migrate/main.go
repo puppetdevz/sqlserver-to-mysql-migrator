@@ -690,23 +690,7 @@ func buildCSVTableMap(csvFiles []string, timestamp string, tableMatcher matcher.
 
 // extractTableNameFromFile 从 CSV 文件名提取表名
 func extractTableNameFromFile(fileName, timestamp string) string {
-	// 移除 .csv 后缀
-	name := strings.TrimSuffix(fileName, ".csv")
-
-	// 如果有时间戳，移除时间戳部分
-	if timestamp != "" {
-		dollarSuffix := "__" + timestamp
-		if strings.HasSuffix(name, dollarSuffix) {
-			return strings.TrimSuffix(name, dollarSuffix) + "$"
-		}
-
-		suffix := "_" + timestamp
-		if strings.HasSuffix(name, suffix) {
-			name = strings.TrimSuffix(name, suffix)
-		}
-	}
-
-	return name
+	return matcher.CSVFileNameToTableName(fileName, timestamp)
 }
 
 // generateMigrationReport 生成迁移报告

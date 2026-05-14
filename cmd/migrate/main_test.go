@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
 )
 
@@ -118,5 +119,45 @@ func TestFinalizeCreateOnlyProgressSkipsUncreatedMissingTablesWhenCreationDisabl
 	}
 	if !info.IsCompleted {
 		t.Fatal("IsCompleted = false, want true")
+	}
+}
+
+func TestFilterTablesCaseSensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(true)
+
+	got := filterTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
+
+	if len(got) != 0 {
+		t.Fatalf("filterTables() = %v, want empty", got)
+	}
+}
+
+func TestFilterTablesCaseInsensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+
+	got := filterTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
+
+	if len(got) != 1 || got[0] != "SAMPLE_MAIN_102" {
+		t.Fatalf("filterTables() = %v, want [SAMPLE_MAIN_102]", got)
+	}
+}
+
+func TestExcludeTablesCaseSensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(true)
+
+	got := excludeTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
+
+	if len(got) != 1 || got[0] != "SAMPLE_MAIN_102" {
+		t.Fatalf("excludeTables() = %v, want [SAMPLE_MAIN_102]", got)
+	}
+}
+
+func TestExcludeTablesCaseInsensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+
+	got := excludeTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
+
+	if len(got) != 0 {
+		t.Fatalf("excludeTables() = %v, want empty", got)
 	}
 }

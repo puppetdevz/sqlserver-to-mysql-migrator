@@ -108,8 +108,11 @@ func main() {
 	logger.Infof("Version: %s", Version)
 	logger.Infof("Config: %s", *configPath)
 
+	tableMatcher := matcher.NewTableNameMatcher(cfg.Migration.IsTableNameCaseSensitive())
+	logger.Infof("Table name case sensitive: %t", tableMatcher.CaseSensitive())
+
 	// 连接数据库
-	conn, err := database.RetryConnect(&cfg.Target, 3)
+	conn, err := database.RetryConnectWithMatcher(&cfg.Target, 3, tableMatcher)
 	if err != nil {
 		logger.Fatalf("Failed to connect to database: %v", err)
 	}
@@ -126,7 +129,7 @@ func main() {
 	tracker.StartProgressReporter(10 * time.Second)
 
 	// 执行迁移
-	if err := runMigration(cfg, conn, tracker); err != nil {
+	if err := runMigration(cfg, conn, tracker, tableMatcher); err != nil {
 		logger.Fatalf("Migration failed: %v", err)
 	}
 
@@ -137,7 +140,7 @@ func main() {
 }
 
 // runMigration 执行迁移（新流程）
-func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker) error {
+func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker, tableMatcher matcher.TableNameMatcher) error {
 	// 创建迁移上下文
 	migrationCtx := migration.NewMigrationContext()
 	defer func() {
@@ -154,6 +157,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		return fmt.Errorf("failed to parse DDL file: %w", err)
 	}
 	logger.Infof("Parsed %d DDL definitions from %s", len(allDDLs), cfg.Source.DDLFile)
+	ddlLookup := buildDDLLookup(allDDLs, tableMatcher)
 
 	// 从 DDL 获取所有表名列表
 	var allTableNames []string
@@ -165,7 +169,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	// 如果指定了表列表，过滤
 	if *tables != "" {
 		specifiedTables := strings.Split(*tables, ",")
-		allTableNames = filterTables(allTableNames, specifiedTables)
+		allTableNames = filterTables(allTableNames, specifiedTables, tableMatcher)
 		logger.Infof("Filtered to %d specified tables", len(allTableNames))
 	}
 
@@ -176,14 +180,14 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 			return fmt.Errorf("failed to get completed tables: %w", err)
 		}
 		logger.Infof("Resume mode: skipping %d completed tables", len(completedTables))
-		allTableNames = excludeTables(allTableNames, completedTables)
+		allTableNames = excludeTables(allTableNames, completedTables, tableMatcher)
 	}
 
 	tracker.SetPlannedTotalTables(len(allTableNames))
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 
 	// 分类表（已存在 vs 缺失）
-	inspector := database.NewInspector(conn, matcher.DefaultTableNameMatcher())
+	inspector := database.NewInspector(conn, tableMatcher)
 	classification, err := inspector.ClassifyTables(allTableNames)
 	if err != nil {
 		return fmt.Errorf("failed to classify tables: %w", err)
@@ -196,7 +200,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	// 注意：classification.MissingTables 是基于 DDL 全量表的缺失部分
 	// 这里会创建所有 DDL 中有但数据库中不存在的表
 	if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
-		if err := createAndTrackTables(cfg, conn, classification.MissingTables, allDDLs, tracker, migrationCtx); err != nil {
+		if err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher); err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
 			// 继续执行，允许部分表创建失败
 		}
@@ -244,15 +248,12 @@ func scanCSVFiles(directory string) ([]string, error) {
 }
 
 // filterTables 过滤表列表
-func filterTables(allTables []string, specifiedTables []string) []string {
-	specifiedMap := make(map[string]bool)
-	for _, table := range specifiedTables {
-		specifiedMap[strings.ToUpper(strings.TrimSpace(table))] = true
-	}
+func filterTables(allTables []string, specifiedTables []string, tableMatcher matcher.TableNameMatcher) []string {
+	specifiedSet := tableMatcher.BuildSet(specifiedTables)
 
 	var filtered []string
 	for _, table := range allTables {
-		if specifiedMap[strings.ToUpper(table)] {
+		if _, ok := specifiedSet[tableMatcher.Key(table)]; ok {
 			filtered = append(filtered, table)
 		}
 	}
@@ -261,20 +262,33 @@ func filterTables(allTables []string, specifiedTables []string) []string {
 }
 
 // excludeTables 排除表列表
-func excludeTables(allTables []string, excludedTables []string) []string {
-	excludedMap := make(map[string]bool)
-	for _, table := range excludedTables {
-		excludedMap[strings.ToUpper(table)] = true
-	}
+func excludeTables(allTables []string, excludedTables []string, tableMatcher matcher.TableNameMatcher) []string {
+	excludedSet := tableMatcher.BuildSet(excludedTables)
 
 	var filtered []string
 	for _, table := range allTables {
-		if !excludedMap[strings.ToUpper(table)] {
+		if _, ok := excludedSet[tableMatcher.Key(table)]; !ok {
 			filtered = append(filtered, table)
 		}
 	}
 
 	return filtered
+}
+
+func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.TableNameMatcher) map[string]*parser.TableDDL {
+	lookup := make(map[string]*parser.TableDDL, len(allDDLs))
+	for _, tableDDL := range allDDLs {
+		if tableDDL == nil {
+			continue
+		}
+		key := tableMatcher.Key(tableDDL.TableName)
+		if existing, ok := lookup[key]; ok {
+			logger.Warnf("DDL table name conflict under current case-sensitivity setting: %s and %s", existing.TableName, tableDDL.TableName)
+			continue
+		}
+		lookup[key] = tableDDL
+	}
+	return lookup
 }
 
 // truncateExistingTables 清空所有已存在的表
@@ -326,7 +340,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
-func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, allDDLs map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext) error {
+func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) error {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
 	tracker.StartPhase("create-missing-tables", len(missingTables))
@@ -350,22 +364,22 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 		}
 
 		tracker.StartTable(tableName, "", false)
-		upperTableName := strings.ToUpper(tableName)
-		tableDDL, ok := allDDLs[upperTableName]
+		lookupName := tableName
+		tableDDL, ok := ddlLookup[tableMatcher.Key(lookupName)]
 
 		// CSV 文件名尾部 _ 对应 DDL 表名尾部 $，做映射修复
-		if !ok && strings.HasSuffix(upperTableName, "_") {
-			mappedName := upperTableName[:len(upperTableName)-1] + "$"
-			tableDDL, ok = allDDLs[mappedName]
+		if !ok && strings.HasSuffix(lookupName, "_") {
+			mappedName := lookupName[:len(lookupName)-1] + "$"
+			tableDDL, ok = ddlLookup[tableMatcher.Key(mappedName)]
 			if ok {
 				logger.Infof("Table name mapping applied: %s -> %s", tableName, mappedName)
 			}
 		}
 
 		if !ok {
-			attemptedNames := upperTableName
-			if strings.HasSuffix(upperTableName, "_") {
-				attemptedNames = fmt.Sprintf("%s, %s (with $ suffix)", upperTableName, upperTableName[:len(upperTableName)-1]+"$")
+			attemptedNames := lookupName
+			if strings.HasSuffix(lookupName, "_") {
+				attemptedNames = fmt.Sprintf("%s, %s (with $ suffix)", lookupName, lookupName[:len(lookupName)-1]+"$")
 			}
 			logger.Warnf("Table DDL not found: %s (attempted: %s)", tableName, attemptedNames)
 			tracker.SkipTable(tableName, fmt.Sprintf("DDL not found (attempted: %s)", attemptedNames))

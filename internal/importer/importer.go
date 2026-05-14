@@ -284,6 +284,8 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	var processedRows int64
 	var errorCount int64
 	var batchNum int
+	var lineNum int
+	var lastErr error
 	var wg sync.WaitGroup
 
 	// 启动 CSV 读取 goroutine
@@ -299,6 +301,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 				// 无表头模式：先处理 firstData，再继续读取
 				batch = append(batch, firstData)
 				firstData = nil // 置空，后续从 reader 读取
+				lineNum++
 			} else {
 				// 读取一批数据
 				for i := 0; i < ti.cfg.Migration.BatchSize; i++ {
@@ -307,10 +310,14 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 						break
 					}
 					if err != nil {
-						logger.Warnf("Failed to read row in %s: %v", ti.tableName, err)
-						continue
+						lastErr = err
+						errorCount++
+						logger.Errorf("CSV read error in %s at line %d: %v", ti.tableName, lineNum, err)
+						close(csvDone)
+						return
 					}
 					batch = append(batch, row)
+					lineNum++
 				}
 			}
 
@@ -337,7 +344,6 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	}(firstRow) // 无表头模式传递 firstRow，有表头模式传递 nil
 
 	// 启动数据库写入 goroutine
-	var lastErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

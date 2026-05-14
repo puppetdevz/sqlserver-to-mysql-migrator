@@ -674,16 +674,16 @@ func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDia
 	if di.cfg.Source.CSVTimestamp != "" {
 		ts := di.cfg.Source.CSVTimestamp
 		expectedFileNames = append(expectedFileNames, fmt.Sprintf("%s_%s.csv", tableName, ts))
-		// $ suffix: TABLE$_TIMESTAMP → TABLE__TIMESTAMP.csv
+		// $ suffix: TABLE$ → TABLE__.csv
 		if strings.HasSuffix(tableName, "$") {
-			base := strings.TrimSuffix(tableName, "$") + "__"
+			base := matcher.TableNameToCSVFileName(tableName) + "__"
 			expectedFileNames = append(expectedFileNames, fmt.Sprintf("%s%s.csv", base, ts))
 		}
 	} else {
 		expectedFileNames = append(expectedFileNames, tableName+".csv")
 		// $ suffix: TABLE$ → TABLE__.csv
 		if strings.HasSuffix(tableName, "$") {
-			base := strings.TrimSuffix(tableName, "$") + "__"
+			base := matcher.TableNameToCSVFileName(tableName) + "__"
 			expectedFileNames = append(expectedFileNames, base+".csv")
 		}
 	}

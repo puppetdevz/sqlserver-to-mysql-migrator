@@ -232,7 +232,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	logger.Infof("Found %d CSV files", len(csvFiles))
 
 	// 导入数据（仅处理有 CSV 文件的表）
-	if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker, migrationCtx); err != nil {
+	if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker, migrationCtx, tableMatcher); err != nil {
 		return fmt.Errorf("failed to import data: %w", err)
 	}
 
@@ -472,29 +472,30 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 }
 
 // importDataWithCSVMapping 导入数据（基于 CSV 文件映射）
-func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, allowedTables []string, tracker *progress.Tracker, migrationCtx *migration.MigrationContext) error {
+func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, allowedTables []string, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) error {
 	// 从 CSV 文件名提取表名 -> CSV 文件路径 的映射
-	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp)
+	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
 
 	// 构建允许表名的查找集合（O(1) 查找）
-	allowedSet := make(map[string]struct{}, len(allowedTables))
+	allowedByKey := make(map[string]string, len(allowedTables))
 	for _, t := range allowedTables {
-		allowedSet[t] = struct{}{}
+		allowedByKey[tableMatcher.Key(t)] = t
 	}
 
 	var tablesToImport []string
 	// First add tables from CSV map that are in allowed set
-	for tableName := range csvTableMap {
+	for tableKey, csvPath := range csvTableMap {
 		if allowedTables == nil {
+			tableName := extractTableNameFromFile(filepath.Base(csvPath), cfg.Source.CSVTimestamp)
 			tablesToImport = append(tablesToImport, tableName)
-		} else if _, ok := allowedSet[tableName]; ok {
-			tablesToImport = append(tablesToImport, tableName)
+		} else if originalName, ok := allowedByKey[tableKey]; ok {
+			tablesToImport = append(tablesToImport, originalName)
 		}
 	}
 	// Then add allowed tables not in CSV map (for CSV_NOT_FOUND diagnostic)
 	if allowedTables != nil {
 		for _, t := range allowedTables {
-			if _, inCSV := csvTableMap[t]; !inCSV {
+			if _, inCSV := csvTableMap[tableMatcher.Key(t)]; !inCSV {
 				tablesToImport = append(tablesToImport, t)
 			}
 		}
@@ -531,7 +532,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				logger.Infof("[Worker %d] Processing table: %s", workerID, tableName)
 
 				// 查找 CSV 文件路径
-				csvPath, ok := csvTableMap[tableName]
+				csvPath, ok := csvTableMap[tableMatcher.Key(tableName)]
 				if !ok {
 					// Call FindCSVFile directly to get the diagnostic with TriedPaths
 					_, _, diag := dataImporter.FindCSVFile(tableName)
@@ -666,7 +667,7 @@ func finalizeCreateOnlyProgress(tracker *progress.Tracker, existingTables, missi
 }
 
 // buildCSVTableMap 从 CSV 文件列表构建表名 -> 文件路径映射
-func buildCSVTableMap(csvFiles []string, timestamp string) map[string]string {
+func buildCSVTableMap(csvFiles []string, timestamp string, tableMatcher matcher.TableNameMatcher) map[string]string {
 	tableMap := make(map[string]string)
 
 	for _, csvPath := range csvFiles {
@@ -675,7 +676,12 @@ func buildCSVTableMap(csvFiles []string, timestamp string) map[string]string {
 		fileName := filepath.Base(csvPath)
 		tableName := extractTableNameFromFile(fileName, timestamp)
 		if tableName != "" {
-			tableMap[tableName] = csvPath
+			key := tableMatcher.Key(tableName)
+			if existing, ok := tableMap[key]; ok {
+				logger.Warnf("CSV table name conflict under current case-sensitivity setting: %s and %s", existing, csvPath)
+				continue
+			}
+			tableMap[key] = csvPath
 		}
 	}
 

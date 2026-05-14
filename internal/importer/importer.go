@@ -13,12 +13,13 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 )
 
 const (
 	maxRetries   = 3
 	retryDelayMs = 100
-	bufferSize   = 10 // 流水线缓冲区大小
+	bufferSize   = 10       // 流水线缓冲区大小
 	bom          = "\uFEFF" // UTF-8 BOM 字符
 )
 
@@ -424,8 +425,8 @@ const (
 // Returned alongside error so the caller can log it before continuing.
 type ImportDiagnostic struct {
 	TableName   string
-	ErrorType   string  // ErrorTypeEOF, ErrorTypeNoMatch, or ErrorTypeCSVNotFound
-	ErrorDetail string  // e.g. "failed to read CSV header (EOF)"
+	ErrorType   string // ErrorTypeEOF, ErrorTypeNoMatch, or ErrorTypeCSVNotFound
+	ErrorDetail string // e.g. "failed to read CSV header (EOF)"
 	CSVPath     string
 	CSVColumns  []string
 	DBColumns   []string
@@ -618,14 +619,49 @@ func (di *DataImporter) GetErrorRecorder() *ErrorRecorder {
 	return di.errorRecorder
 }
 
-// tryPaths tries each path in order, returning the first that exists.
-// All attempted paths (including not-found) are appended to triedPaths.
-func tryPaths(paths []string, triedPaths *[]string) string {
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return p
+func findMatchingCSVPath(csvDir, expectedFileName string, tableMatcher matcher.TableNameMatcher, triedPaths *[]string) string {
+	expectedPath := filepath.Join(csvDir, expectedFileName)
+
+	entries, err := os.ReadDir(csvDir)
+	if err != nil {
+		*triedPaths = append(*triedPaths, expectedPath)
+		return ""
+	}
+
+	if tableMatcher.CaseSensitive() {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if name != expectedFileName {
+				continue
+			}
+			path := filepath.Join(csvDir, name)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+			*triedPaths = append(*triedPaths, path)
+			return ""
 		}
-		*triedPaths = append(*triedPaths, p)
+		*triedPaths = append(*triedPaths, expectedPath)
+		return ""
+	}
+
+	expectedKey := tableMatcher.Key(expectedFileName)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".csv") {
+			continue
+		}
+		path := filepath.Join(csvDir, name)
+		*triedPaths = append(*triedPaths, path)
+		if tableMatcher.Key(name) == expectedKey {
+			return path
+		}
 	}
 	return ""
 }
@@ -634,45 +670,30 @@ func tryPaths(paths []string, triedPaths *[]string) string {
 func (di *DataImporter) FindCSVFile(tableName string) (string, error, *ImportDiagnostic) {
 	var triedPaths []string
 	csvDir := di.cfg.Source.CSVDirectory
+	tableMatcher := matcher.NewTableNameMatcher(di.cfg.Migration.IsTableNameCaseSensitive())
+
+	var expectedFileNames []string
 
 	if di.cfg.Source.CSVTimestamp != "" {
 		ts := di.cfg.Source.CSVTimestamp
-		if path := tryPaths([]string{
-			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", tableName, ts)),
-			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToLower(tableName), ts)),
-			filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToUpper(tableName), ts)),
-		}, &triedPaths); path != "" {
-			return path, nil, nil
-		}
+		expectedFileNames = append(expectedFileNames, fmt.Sprintf("%s_%s.csv", tableName, ts))
 		// $ suffix: TABLE$_TIMESTAMP → TABLE__TIMESTAMP.csv
 		if strings.HasSuffix(tableName, "$") {
 			base := strings.TrimSuffix(tableName, "$") + "__"
-			if path := tryPaths([]string{
-				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", base, ts)),
-				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToLower(base), ts)),
-				filepath.Join(csvDir, fmt.Sprintf("%s_%s.csv", strings.ToUpper(base), ts)),
-			}, &triedPaths); path != "" {
-				return path, nil, nil
-			}
+			expectedFileNames = append(expectedFileNames, fmt.Sprintf("%s_%s.csv", base, ts))
 		}
 	} else {
-		if path := tryPaths([]string{
-			filepath.Join(csvDir, tableName+".csv"),
-			filepath.Join(csvDir, strings.ToLower(tableName)+".csv"),
-			filepath.Join(csvDir, strings.ToUpper(tableName)+".csv"),
-		}, &triedPaths); path != "" {
-			return path, nil, nil
-		}
+		expectedFileNames = append(expectedFileNames, tableName+".csv")
 		// $ suffix: TABLE$ → TABLE__.csv
 		if strings.HasSuffix(tableName, "$") {
 			base := strings.TrimSuffix(tableName, "$") + "__"
-			if path := tryPaths([]string{
-				filepath.Join(csvDir, base+".csv"),
-				filepath.Join(csvDir, strings.ToLower(base)+".csv"),
-				filepath.Join(csvDir, strings.ToUpper(base)+".csv"),
-			}, &triedPaths); path != "" {
-				return path, nil, nil
-			}
+			expectedFileNames = append(expectedFileNames, base+".csv")
+		}
+	}
+
+	for _, expectedFileName := range expectedFileNames {
+		if path := findMatchingCSVPath(csvDir, expectedFileName, tableMatcher, &triedPaths); path != "" {
+			return path, nil, nil
 		}
 	}
 

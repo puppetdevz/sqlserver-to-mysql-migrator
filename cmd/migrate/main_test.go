@@ -205,3 +205,28 @@ func TestBuildDDLLookupKeepsLexicographicallyFirstConflict(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCSVTableMapCaseSensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(true)
+	csvPath := "/tmp/sample_main_102_20000101000000.csv"
+
+	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+
+	if _, ok := tableMap[tableMatcher.Key("SAMPLE_MAIN_102")]; ok {
+		t.Fatal("buildCSVTableMap matched different case in case-sensitive mode")
+	}
+	if got := tableMap[tableMatcher.Key("sample_main_102")]; got != csvPath {
+		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
+	}
+}
+
+func TestBuildCSVTableMapCaseInsensitive(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+	csvPath := "/tmp/sample_main_102_20000101000000.csv"
+
+	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+
+	if got := tableMap[tableMatcher.Key("SAMPLE_MAIN_102")]; got != csvPath {
+		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
+	}
+}

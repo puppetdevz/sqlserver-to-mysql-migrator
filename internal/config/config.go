@@ -15,10 +15,10 @@ type Config struct {
 
 // SourceConfig 源数据配置
 type SourceConfig struct {
-	DDLFile       string `yaml:"ddl_file"`
-	CSVDirectory  string `yaml:"csv_directory"`
-	CSVTimestamp  string `yaml:"csv_timestamp"`
-	CSVHasHeader  bool   `yaml:"csv_has_header"` // CSV 文件是否包含表头，默认 true
+	DDLFile      string `yaml:"ddl_file"`
+	CSVDirectory string `yaml:"csv_directory"`
+	CSVTimestamp string `yaml:"csv_timestamp"`
+	CSVHasHeader bool   `yaml:"csv_has_header"` // CSV 文件是否包含表头，默认 true
 }
 
 // TargetConfig 目标数据库配置
@@ -36,14 +36,15 @@ type TargetConfig struct {
 
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
-	FastFail             bool   `yaml:"fast_fail"`              // 遇错即停（true）或记录错误跳过（false）
-	BatchSize            int    `yaml:"batch_size"`
-	MaxWorkers           int    `yaml:"max_workers"`
-	EnableResume         bool   `yaml:"enable_resume"`
-	TruncateBeforeImport bool   `yaml:"truncate_before_import"`
-	CreateMissingTables  bool   `yaml:"create_missing_tables"`
-	OnDuplicate          string `yaml:"on_duplicate"` // "replace" or "ignore"
-	StateDir             string `yaml:"state_dir"`
+	FastFail               bool   `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
+	TableNameCaseSensitive *bool  `yaml:"table_name_case_sensitive"`
+	BatchSize              int    `yaml:"batch_size"`
+	MaxWorkers             int    `yaml:"max_workers"`
+	EnableResume           bool   `yaml:"enable_resume"`
+	TruncateBeforeImport   bool   `yaml:"truncate_before_import"`
+	CreateMissingTables    bool   `yaml:"create_missing_tables"`
+	OnDuplicate            string `yaml:"on_duplicate"` // "replace" or "ignore"
+	StateDir               string `yaml:"state_dir"`
 }
 
 // LoggingConfig 日志配置
@@ -65,4 +66,12 @@ func (t *TargetConfig) GetDSN() string {
 // GetConnMaxLifetime 获取连接最大生命周期
 func (t *TargetConfig) GetConnMaxLifetime() time.Duration {
 	return time.Duration(t.ConnMaxLifetime) * time.Second
+}
+
+// IsTableNameCaseSensitive returns the effective table-name matching mode.
+func (m MigrationConfig) IsTableNameCaseSensitive() bool {
+	if m.TableNameCaseSensitive == nil {
+		return true
+	}
+	return *m.TableNameCaseSensitive
 }

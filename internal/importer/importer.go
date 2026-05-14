@@ -621,10 +621,10 @@ func (di *DataImporter) GetErrorRecorder() *ErrorRecorder {
 
 func findMatchingCSVPath(csvDir, expectedFileName string, tableMatcher matcher.TableNameMatcher, triedPaths *[]string) string {
 	expectedPath := filepath.Join(csvDir, expectedFileName)
+	*triedPaths = append(*triedPaths, expectedPath)
 
 	entries, err := os.ReadDir(csvDir)
 	if err != nil {
-		*triedPaths = append(*triedPaths, expectedPath)
 		return ""
 	}
 
@@ -641,10 +641,8 @@ func findMatchingCSVPath(csvDir, expectedFileName string, tableMatcher matcher.T
 			if _, err := os.Stat(path); err == nil {
 				return path
 			}
-			*triedPaths = append(*triedPaths, path)
 			return ""
 		}
-		*triedPaths = append(*triedPaths, expectedPath)
 		return ""
 	}
 
@@ -658,7 +656,6 @@ func findMatchingCSVPath(csvDir, expectedFileName string, tableMatcher matcher.T
 			continue
 		}
 		path := filepath.Join(csvDir, name)
-		*triedPaths = append(*triedPaths, path)
 		if tableMatcher.Key(name) == expectedKey {
 			return path
 		}

@@ -11,6 +11,7 @@ type Config struct {
 	Target    TargetConfig    `yaml:"target"`
 	Migration MigrationConfig `yaml:"migration"`
 	Logging   LoggingConfig   `yaml:"logging"`
+	Converter ConverterConfig `yaml:"converter"`
 }
 
 // SourceConfig 源数据配置
@@ -55,6 +56,28 @@ type LoggingConfig struct {
 	MaxSize    int    `yaml:"max_size"`
 	MaxBackups int    `yaml:"max_backups"`
 	MaxAge     int    `yaml:"max_age"`
+}
+
+// ConverterConfig 类型转换器配置
+type ConverterConfig struct {
+	MaxVarcharToTextColumns   int `yaml:"max_varchar_to_text_columns"`    // 默认 10
+	MaxNvarcharToTextColumns  int `yaml:"max_nvarchar_to_text_columns"`   // 默认 10
+}
+
+// IsEffectiveMaxVarcharToTextColumns 返回有效阈值（0 时使用默认值 10）
+func (c ConverterConfig) IsEffectiveMaxVarcharToTextColumns() int {
+	if c.MaxVarcharToTextColumns <= 0 {
+		return 10
+	}
+	return c.MaxVarcharToTextColumns
+}
+
+// IsEffectiveMaxNvarcharToTextColumns 返回有效阈值（0 时使用默认值 10）
+func (c ConverterConfig) IsEffectiveMaxNvarcharToTextColumns() int {
+	if c.MaxNvarcharToTextColumns <= 0 {
+		return 10
+	}
+	return c.MaxNvarcharToTextColumns
 }
 
 // GetDSN 生成 MySQL DSN 连接字符串

@@ -36,29 +36,25 @@ func (tm *TypeMapper) MapType(sqlServerType string) (string, error) {
 	// 移除空格并转为小写
 	sqlServerType = strings.TrimSpace(strings.ToLower(sqlServerType))
 
-	// nvarchar(n) -> text（避免行大小超限）
+	// nvarchar(max) -> longtext
+	if sqlServerType == "nvarchar(max)" {
+		return "longtext", nil
+	}
+
+	// nvarchar(n) -> varchar(n)
 	if strings.HasPrefix(sqlServerType, "nvarchar") {
-		re := regexp.MustCompile(`nvarchar\((\d+|max)\)`)
+		re := regexp.MustCompile(`nvarchar\((\d+)\)`)
 		if re.MatchString(sqlServerType) {
 			size := re.FindStringSubmatch(sqlServerType)[1]
-			if size == "max" {
-				return "longtext", nil
-			}
-			// utf8mb4: varchar(100)=402字节，177列即超 65535 限制；表单字段用 TEXT 更合适
-			return "text", nil
+			return fmt.Sprintf("varchar(%s)", size), nil
 		}
 	}
 
-	// varchar(n) -> text（避免行大小超限）
+	// varchar(n) -> varchar(n)（保留原样）
 	if strings.HasPrefix(sqlServerType, "varchar") {
 		re := regexp.MustCompile(`varchar\((\d+|max)\)`)
 		if re.MatchString(sqlServerType) {
-			size := re.FindStringSubmatch(sqlServerType)[1]
-			if size == "max" {
-				return "longtext", nil
-			}
-			// utf8mb4: varchar(100)=402字节，177列即超 65535 限制；表单字段用 TEXT 更合适
-			return "text", nil
+			return sqlServerType, nil
 		}
 	}
 

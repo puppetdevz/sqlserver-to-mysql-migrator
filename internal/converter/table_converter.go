@@ -10,6 +10,13 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 )
 
+// 包级别预编译正则表达式（避免循环内重复编译）
+var (
+	reNvarchar      = regexp.MustCompile(`nvarchar\((\d+)\)`)
+	reVarchar       = regexp.MustCompile(`varchar\((\d+)\)`)
+	reTrimNullable  = regexp.MustCompile(`\s+(NOT\s+)?NULL$`)
+)
+
 // TableConverter 表结构转换器
 type TableConverter struct {
 	typeMapper *TypeMapper
@@ -44,8 +51,7 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 		sqlType := strings.TrimSpace(strings.ToLower(typePart))
 
 		// NVARCHAR(n)，n > 192
-		re := regexp.MustCompile(`nvarchar\((\d+)\)`)
-		if matches := re.FindStringSubmatch(sqlType); len(matches) > 0 {
+		if matches := reNvarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
 			if n, _ := strconv.Atoi(matches[1]); n > 192 {
 				largeNvarcharCols = append(largeNvarcharCols, column.Name)
 			}
@@ -53,8 +59,7 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 		}
 
 		// VARCHAR(n)，n > 256
-		re = regexp.MustCompile(`varchar\((\d+)\)`)
-		if matches := re.FindStringSubmatch(sqlType); len(matches) > 0 {
+		if matches := reVarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
 			if n, _ := strconv.Atoi(matches[1]); n > 256 {
 				largeVarcharCols = append(largeVarcharCols, column.Name)
 			}
@@ -66,15 +71,15 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 	shouldConvertNvarchar := len(largeNvarcharCols) > tc.config.IsEffectiveMaxNvarcharToTextColumns()
 	shouldConvertVarchar := len(largeVarcharCols) > tc.config.IsEffectiveMaxVarcharToTextColumns()
 
-	// 构建强转列 map
+	// 构建强转列 map（仅在触发转换条件时迭代）
 	forceTextColumns := make(map[string]bool)
-	for _, col := range largeNvarcharCols {
-		if shouldConvertNvarchar {
+	if shouldConvertNvarchar {
+		for _, col := range largeNvarcharCols {
 			forceTextColumns[col] = true
 		}
 	}
-	for _, col := range largeVarcharCols {
-		if shouldConvertVarchar {
+	if shouldConvertVarchar {
+		for _, col := range largeVarcharCols {
 			forceTextColumns[col] = true
 		}
 	}
@@ -184,7 +189,7 @@ func (tc *TableConverter) convertColumnWithTextCheck(
 func (tc *TableConverter) extractType(typeDef string) string {
 	// 移除 NULL/NOT NULL
 	typeDef = strings.TrimSpace(typeDef)
-	typeDef = regexp.MustCompile(`\s+(NOT\s+)?NULL$`).ReplaceAllString(typeDef, "")
+	typeDef = reTrimNullable.ReplaceAllString(typeDef, "")
 	return strings.TrimSpace(typeDef)
 }
 
@@ -211,14 +216,3 @@ func (tc *TableConverter) convertIndex(tableName string, index parser.IndexDef, 
 		indexType, index.Name, tableName, strings.Join(columns, ", "))
 }
 
-// isTextColumn 检查列是否可能为 TEXT 类型
-func (tc *TableConverter) isTextColumn(columnName string) bool {
-	textPrefixes := []string{"trigger_name", "trigger_group", "job_name", "job_group",
-		"corp_code", "department_path", "department_code"}
-	for _, prefix := range textPrefixes {
-		if strings.EqualFold(columnName, prefix) {
-			return true
-		}
-	}
-	return false
-}

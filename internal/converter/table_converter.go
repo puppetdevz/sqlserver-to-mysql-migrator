@@ -3,20 +3,24 @@ package converter
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 )
 
 // TableConverter 表结构转换器
 type TableConverter struct {
 	typeMapper *TypeMapper
+	config     config.ConverterConfig
 }
 
 // NewTableConverter 创建表转换器
-func NewTableConverter() *TableConverter {
+func NewTableConverter(cfg config.ConverterConfig) *TableConverter {
 	return &TableConverter{
 		typeMapper: NewTypeMapper(),
+		config:     cfg,
 	}
 }
 
@@ -30,9 +34,54 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 	// 记录哪些列会被转为 TEXT（用于后续跳过索引）
 	textColumns := make(map[string]bool)
 
+	// 统计 nvarchar(>192) 和 varchar(>256) 列
+	var largeNvarcharCols []string
+	var largeVarcharCols []string
+
+	for _, column := range tableDDL.Columns {
+		cleanType := tc.typeMapper.CleanCollation(column.Type)
+		typePart := tc.extractType(cleanType)
+		sqlType := strings.TrimSpace(strings.ToLower(typePart))
+
+		// NVARCHAR(n)，n > 192
+		re := regexp.MustCompile(`nvarchar\((\d+)\)`)
+		if matches := re.FindStringSubmatch(sqlType); len(matches) > 0 {
+			if n, _ := strconv.Atoi(matches[1]); n > 192 {
+				largeNvarcharCols = append(largeNvarcharCols, column.Name)
+			}
+			continue
+		}
+
+		// VARCHAR(n)，n > 256
+		re = regexp.MustCompile(`varchar\((\d+)\)`)
+		if matches := re.FindStringSubmatch(sqlType); len(matches) > 0 {
+			if n, _ := strconv.Atoi(matches[1]); n > 256 {
+				largeVarcharCols = append(largeVarcharCols, column.Name)
+			}
+			continue
+		}
+	}
+
+	// 与阈值比较，判断是否触发转换
+	shouldConvertNvarchar := len(largeNvarcharCols) > tc.config.IsEffectiveMaxNvarcharToTextColumns()
+	shouldConvertVarchar := len(largeVarcharCols) > tc.config.IsEffectiveMaxVarcharToTextColumns()
+
+	// 构建强转列 map
+	forceTextColumns := make(map[string]bool)
+	for _, col := range largeNvarcharCols {
+		if shouldConvertNvarchar {
+			forceTextColumns[col] = true
+		}
+	}
+	for _, col := range largeVarcharCols {
+		if shouldConvertVarchar {
+			forceTextColumns[col] = true
+		}
+	}
+
 	// 列定义
 	for i, column := range tableDDL.Columns {
-		columnDef, err := tc.convertColumnWithTextCheck(column, textColumns)
+		columnDef, err := tc.convertColumnWithTextCheck(column, textColumns, forceTextColumns)
 		if err != nil {
 			return "", fmt.Errorf("failed to convert column %s: %w", column.Name, err)
 		}
@@ -67,7 +116,7 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 	// 如果主键被跳过（包含 TEXT 列），不添加主键
 	// （已经在上面处理了）
 
-	ddl.WriteString(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8;\n")
+	ddl.WriteString(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;\n")
 
 	// 索引 - 跳过包含 TEXT 列的索引
 	for _, index := range tableDDL.Indexes {
@@ -82,7 +131,24 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 }
 
 // convertColumnWithTextCheck 转换列定义并记录 TEXT 类型
-func (tc *TableConverter) convertColumnWithTextCheck(column parser.ColumnDef, textColumns map[string]bool) (string, error) {
+func (tc *TableConverter) convertColumnWithTextCheck(
+	column parser.ColumnDef,
+	textColumns map[string]bool,
+	forceTextColumns map[string]bool,
+) (string, error) {
+	// 如果列在 forceTextColumns 中，强制转为 TEXT
+	if forceTextColumns[column.Name] {
+		textColumns[column.Name] = true
+		var def strings.Builder
+		def.WriteString(fmt.Sprintf("`%s` text", column.Name))
+		if !column.Nullable {
+			def.WriteString(" NOT NULL")
+		} else {
+			def.WriteString(" NULL")
+		}
+		return def.String(), nil
+	}
+
 	// 移除 COLLATE
 	cleanType := tc.typeMapper.CleanCollation(column.Type)
 

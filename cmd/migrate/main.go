@@ -365,7 +365,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	defer tracker.ClearPhase()
 
 	// 创建转换器
-	tableConverter := converter.NewTableConverter()
+	tableConverter := converter.NewTableConverter(cfg.Converter)
 
 	// 创建表
 	successCount := 0

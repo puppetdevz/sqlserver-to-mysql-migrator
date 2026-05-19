@@ -21,6 +21,7 @@
 # Build artifacts
 /dist/
 /migrate
+migrate
 
 # Migration state (runtime generated)
 state.db
@@ -34,3 +35,5 @@ logs/
 
 # Data files (large, don't need version control)
 data/
+.go-cache
+.claude/worktrees/

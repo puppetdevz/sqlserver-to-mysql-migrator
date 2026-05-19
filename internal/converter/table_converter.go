@@ -2,7 +2,6 @@ package converter
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -10,12 +9,8 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 )
 
-// 包级别预编译正则表达式（避免循环内重复编译）
-var (
-	reNvarchar      = regexp.MustCompile(`nvarchar\((\d+)\)`)
-	reVarchar       = regexp.MustCompile(`varchar\((\d+)\)`)
-	reTrimNullable  = regexp.MustCompile(`\s+(NOT\s+)?NULL$`)
-)
+// 包级别正则已移至 type_mapper.go（reNvarchar, reVarchar, reTrimNullable）
+// 阈值常量也在 type_mapper.go（VarcharThreshold=256, NvarcharThreshold=192）
 
 // TableConverter 表结构转换器
 type TableConverter struct {
@@ -118,9 +113,6 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 		}
 	}
 
-	// 如果主键被跳过（包含 TEXT 列），不添加主键
-	// （已经在上面处理了）
-
 	ddl.WriteString(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;\n")
 
 	// 索引 - 跳过包含 TEXT 列的索引
@@ -215,4 +207,3 @@ func (tc *TableConverter) convertIndex(tableName string, index parser.IndexDef, 
 	return fmt.Sprintf("CREATE %s `%s` ON `%s` (%s);",
 		indexType, index.Name, tableName, strings.Join(columns, ", "))
 }
-

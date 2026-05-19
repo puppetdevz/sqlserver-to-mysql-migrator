@@ -79,7 +79,7 @@ find_latest_backup() {
         ts="${ts#"$BACKUP_PREFIX"}"
         ts="${ts%.sql}"
 
-        if [[ -z "$latest_ts" ]] || [[ "$ts" > "$latest_ts" ]]; then
+        if [[ -z "$latest_ts" ]] || (( 10#$ts > 10#$latest_ts )); then
             latest_ts="$ts"
             latest_file="$f"
         fi

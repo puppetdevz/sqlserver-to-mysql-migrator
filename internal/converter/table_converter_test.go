@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		cols := make([]parser.ColumnDef, 11)
 		for i := range cols {
 			cols[i] = parser.ColumnDef{
-				Name:     "varchar_col_" + string(rune('0'+i)),
+				Name:     "varchar_col_" + strconv.Itoa(i),
 				Type:     "varchar(300) NULL",
 				Nullable: true,
 			}
@@ -34,7 +35,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		}
 		// All large varchar cols should be TEXT
 		for i := 0; i < 11; i++ {
-			name := "varchar_col_" + string(rune('0'+i))
+			name := "varchar_col_" + strconv.Itoa(i)
 			if !strings.Contains(ddl, "`"+name+"` text") {
 				t.Errorf("DDL should contain `%s` text, got:\n%s", name, ddl)
 			}
@@ -49,7 +50,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		cols := make([]parser.ColumnDef, 9)
 		for i := range cols {
 			cols[i] = parser.ColumnDef{
-				Name:     "small_varchar_" + string(rune('0'+i)),
+				Name:     "small_varchar_" + strconv.Itoa(i),
 				Type:     "varchar(300) NULL",
 				Nullable: true,
 			}
@@ -68,7 +69,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		}
 		// Should not contain TEXT for these columns
 		for i := 0; i < 9; i++ {
-			name := "small_varchar_" + string(rune('0'+i))
+			name := "small_varchar_" + strconv.Itoa(i)
 			if strings.Contains(ddl, "`"+name+"` text") {
 				t.Errorf("DDL should not contain `%s` text (below threshold), got:\n%s", name, ddl)
 			}
@@ -79,7 +80,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		cols := make([]parser.ColumnDef, 11)
 		for i := range cols {
 			cols[i] = parser.ColumnDef{
-				Name:     "nvarchar_col_" + string(rune('0'+i)),
+				Name:     "nvarchar_col_" + strconv.Itoa(i),
 				Type:     "nvarchar(200) NULL",
 				Nullable: true,
 			}

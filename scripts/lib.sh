@@ -108,6 +108,7 @@ run_mysqldump() {
                 --quick \
                 --no-tablespaces \
                 --set-gtid-purged=OFF \
+                --add-drop-table \
                 "$DB_NAME"; } > "$output" 2>&1
     local status=$?
     unset MYSQL_PWD
@@ -130,4 +131,35 @@ run_mysql_restore() {
     unset MYSQL_PWD
 
     return $status
+}
+
+# ========== 获取数据库所有表名 ==========
+# 用法: get_all_tables
+# 输出: 每行一个表名
+get_all_tables() {
+    export MYSQL_PWD="$DB_PASS"
+    mysql --host="$DB_HOST" \
+          --port="$DB_PORT" \
+          --user="$DB_USER" \
+          --database="$DB_NAME" \
+          --skip-column-names \
+          --batch \
+          -e "SHOW TABLES;" 2>/dev/null
+    local status=$?
+    unset MYSQL_PWD
+    return $status
+}
+
+# ========== 生成清空所有表的 SQL ==========
+# 用法: generate_drop_statements
+# 输出: DISABLE FOREIGN KEY CHECKS; DROP TABLE ...; ENABLE FOREIGN KEY CHECKS;
+generate_drop_statements() {
+    local tables
+    tables=$(get_all_tables) || return 1
+
+    echo "SET FOREIGN_KEY_CHECKS = 0;"
+    while IFS= read -r table; do
+        [[ -n "$table" ]] && echo "DROP TABLE IF EXISTS \`$table\`;"
+    done <<< "$tables"
+    echo "SET FOREIGN_KEY_CHECKS = 1;"
 }

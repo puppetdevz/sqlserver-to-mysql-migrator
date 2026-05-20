@@ -290,7 +290,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	batchChan := make(chan batchData, bufferSize)
 	resultChan := make(chan batchResult, bufferSize)
 
-	// 获取 fast_fail 配置（闭包捕获，无需锁）
+	// fast_fail 配置（闭包捕获，无需锁）
 	fastFail := ti.cfg.Migration.FastFail == nil || *ti.cfg.Migration.FastFail
 
 	var allErrors []error  // fast_fail=false 时收集所有错误
@@ -402,7 +402,6 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	}()
 
 	wg.Wait()
-	file.Close()
 
 	// 关闭 resultChan 表示不再有结果
 	close(resultChan)

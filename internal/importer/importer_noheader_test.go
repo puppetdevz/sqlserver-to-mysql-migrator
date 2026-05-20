@@ -81,7 +81,7 @@ func TestNoHeaderCSVImport(t *testing.T) {
 	}
 	defer file.Close()
 
-	result, err, diag := ti.pipelinedImport(file, "test_no_header_t")
+	result, err, diag := ti.pipelinedImport(file, "test_no_header_t", 3)
 	if err != nil {
 		if diag != nil {
 			t.Errorf("Import failed with diagnostic: %+v", diag)
@@ -160,7 +160,7 @@ func TestNoHeaderCSVColumnMismatch(t *testing.T) {
 	}
 	defer file.Close()
 
-	_, err, _ = ti2.pipelinedImport(file, "test_no_header_t")
+	_, err, _ = ti2.pipelinedImport(file, "test_no_header_t", 1)
 	if err == nil {
 		t.Error("Expected error for column mismatch, got nil")
 	}
@@ -219,7 +219,7 @@ func TestFirstRowEOF(t *testing.T) {
 	}
 	defer file.Close()
 
-	result, err, _ := ti3.pipelinedImport(file, "test_no_header_t")
+	result, err, _ := ti3.pipelinedImport(file, "test_no_header_t", 0)
 	if err != nil {
 		t.Errorf("Expected no error for empty file, got: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestFirstRowDataPassedToGoroutine(t *testing.T) {
 	}
 	defer file.Close()
 
-	result, err, _ := ti4.pipelinedImport(file, "test_goroutine_t")
+	result, err, _ := ti4.pipelinedImport(file, "test_goroutine_t", 2)
 	if err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestFastFailFalseCollectsAllErrors(t *testing.T) {
 	}
 	defer file.Close()
 
-	result, err, _ := ti.pipelinedImport(file, "test_fast_fail_t")
+	result, err, _ := ti.pipelinedImport(file, "test_fast_fail_t", 3)
 
 	// With fast_fail=false, import completes even with errors
 	// The key assertion: we expect 1 error (the duplicate Alice)

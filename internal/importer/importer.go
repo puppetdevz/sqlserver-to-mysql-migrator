@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"bufio"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -75,14 +76,36 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	// 获取正确大小写的表名（解决 MySQL 大小写不敏感问题）
 	actualTableName := ti.conn.GetActualTableName(ti.tableName)
 
+	// 统计 CSV 总行数（用于进度显示）
+	csvTotalRows, err := countCSVRows(ti.csvPath)
+	if err != nil {
+		logger.Warnf("Failed to count CSV rows for %s: %v", ti.tableName, err)
+	}
+
 	// 使用流水线导入
-	result, err, diag := ti.pipelinedImport(file, actualTableName)
+	result, err, diag := ti.pipelinedImport(file, actualTableName, csvTotalRows)
 	if err != nil {
 		ti.errorRecorder.RecordError(ti.tableName, "", nil, err)
 		return nil, err, diag
 	}
 
 	return result, nil, nil
+}
+
+// countCSVRows 统计 CSV 文件行数（用于进度显示）
+func countCSVRows(csvPath string) (int64, error) {
+	f, err := os.Open(csvPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var count int64
+	for scanner.Scan() {
+		count++
+	}
+	return count, scanner.Err()
 }
 
 // getDBColumns 获取数据库中表的列
@@ -163,7 +186,7 @@ type batchResult struct {
 }
 
 // pipelinedImport 流水线导入：边读边写
-func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) (*ImportResult, error, *ImportDiagnostic) {
+func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, csvTotalRows int64) (*ImportResult, error, *ImportDiagnostic) {
 	reader := csv.NewReader(file)
 	reader.LazyQuotes = true
 	reader.TrimLeadingSpace = true
@@ -447,6 +470,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 			TableName:     ti.tableName,
 			ProcessedRows: processedRows,
 			InsertedRows:  totalRows,
+			TotalRows:     csvTotalRows,
 			ErrorCount:    errorCount,
 			Success:       false,
 			ErrorMessage:  lastErr.Error(),
@@ -460,6 +484,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		TableName:     ti.tableName,
 		ProcessedRows: processedRows,
 		InsertedRows:  totalRows,
+		TotalRows:     csvTotalRows,
 		ErrorCount:    errorCount,
 		Success:       errorCount == 0,
 	}, nil, nil
@@ -470,6 +495,7 @@ type ImportResult struct {
 	TableName     string
 	ProcessedRows int64
 	InsertedRows  int64
+	TotalRows     int64  // CSV 文件总行数
 	ErrorCount    int64
 	Success       bool
 	ErrorMessage  string

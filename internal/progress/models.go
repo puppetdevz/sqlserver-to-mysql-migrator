@@ -30,6 +30,15 @@ type TableState struct {
 	TableCreated  bool            `json:"table_created"`
 }
 
+// TableProgress 单表行级进度
+type TableProgress struct {
+	TableName     string
+	TotalRows     int64
+	ProcessedRows int64
+	InsertedRows  int64
+	Percent       float64
+}
+
 // MigrationState 整体迁移状态
 type MigrationState struct {
 	StartTime      time.Time              `json:"start_time"`
@@ -150,4 +159,26 @@ func (ms *MigrationState) GetPhaseProgress() float64 {
 
 	processed := ms.PhaseCompleted + ms.PhaseFailed + ms.PhaseSkipped
 	return float64(processed) / float64(ms.PhaseTotal) * 100
+}
+
+// GetActiveTables 返回所有处于 in_progress 状态的表的进度
+func (ms *MigrationState) GetActiveTables() map[string]*TableProgress {
+	result := make(map[string]*TableProgress)
+	for tableName := range ms.RunTableNames {
+		state, ok := ms.Tables[tableName]
+		if !ok || state.Status != StatusInProgress {
+			continue
+		}
+		p := &TableProgress{
+			TableName:     tableName,
+			TotalRows:     state.TotalRows,
+			ProcessedRows: state.ProcessedRows,
+			InsertedRows:  state.InsertedRows,
+		}
+		if state.TotalRows > 0 {
+			p.Percent = float64(state.ProcessedRows) / float64(state.TotalRows) * 100
+		}
+		result[tableName] = p
+	}
+	return result
 }

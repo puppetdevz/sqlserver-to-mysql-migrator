@@ -558,6 +558,11 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 
 				if result.Success {
 					logger.Infof("[Worker %d] Table imported: %s (%d rows)", workerID, tableName, result.InsertedRows)
+					if result.TotalRows > 0 {
+						if err := tracker.SetTableTotalRows(tableName, result.TotalRows); err != nil {
+							logger.Warnf("[Worker %d] Failed to set total rows for %s: %v", workerID, tableName, err)
+						}
+					}
 					if err := tracker.CompleteTable(tableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
 						logger.Warnf("[Worker %d] Failed to mark table %s as completed: %v", workerID, tableName, err)
 					}

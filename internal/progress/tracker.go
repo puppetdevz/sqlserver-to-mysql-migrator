@@ -156,6 +156,19 @@ func (t *Tracker) UpdateTableProgress(tableName string, processedRows, insertedR
 	state.InsertedRows = insertedRows
 }
 
+// SetTableTotalRows 设置表的 CSV 总行数
+func (t *Tracker) SetTableTotalRows(tableName string, totalRows int64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state := t.state.GetTable(tableName)
+	if state == nil {
+		return fmt.Errorf("table state not found: %s", tableName)
+	}
+	state.TotalRows = totalRows
+	return nil
+}
+
 // GetProgress 获取进度信息
 func (t *Tracker) GetProgress() ProgressInfo {
 	t.mu.RLock()

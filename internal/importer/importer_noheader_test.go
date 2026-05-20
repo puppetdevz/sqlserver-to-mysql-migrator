@@ -28,7 +28,7 @@ func TestNoHeaderCSVImport(t *testing.T) {
 	// Connect to MySQL
 	cfg := &config.Config{
 		Source: config.SourceConfig{
-			CSVHasHeader: false,
+			CSVHasHeader: func(b bool) *bool { return &b }(false),
 		},
 		Migration: config.MigrationConfig{
 			BatchSize:       100,
@@ -118,7 +118,7 @@ func TestNoHeaderCSVColumnMismatch(t *testing.T) {
 
 	cfg := &config.Config{
 		Source: config.SourceConfig{
-			CSVHasHeader: false,
+			CSVHasHeader: func(b bool) *bool { return &b }(false),
 		},
 		Migration: config.MigrationConfig{
 			BatchSize:   100,
@@ -182,7 +182,7 @@ func TestFirstRowEOF(t *testing.T) {
 
 	cfg := &config.Config{
 		Source: config.SourceConfig{
-			CSVHasHeader: false,
+			CSVHasHeader: func(b bool) *bool { return &b }(false),
 		},
 		Migration: config.MigrationConfig{
 			BatchSize:   100,
@@ -246,7 +246,7 @@ func TestFirstRowDataPassedToGoroutine(t *testing.T) {
 
 	cfg := &config.Config{
 		Source: config.SourceConfig{
-			CSVHasHeader: false,
+			CSVHasHeader: func(b bool) *bool { return &b }(false),
 		},
 		Migration: config.MigrationConfig{
 			BatchSize:   100,

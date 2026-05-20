@@ -96,8 +96,8 @@ logging:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if !cfg.Source.CSVHasHeader {
-		t.Fatal("CSVHasHeader = false, want true when omitted")
+	if cfg.Source.CSVHasHeader == nil || !*cfg.Source.CSVHasHeader {
+		t.Fatal("CSVHasHeader = nil or false, want true when omitted")
 	}
 }
 
@@ -124,7 +124,7 @@ logging:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if !cfg.Migration.FastFail {
-		t.Fatal("FastFail = false, want true when omitted")
+	if cfg.Migration.FastFail == nil || !*cfg.Migration.FastFail {
+		t.Fatal("FastFail = nil or false, want true when omitted")
 	}
 }

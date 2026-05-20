@@ -29,6 +29,10 @@ func Load(configPath string) (*Config, error) {
 	return &cfg, nil
 }
 
+func newBool(v bool) *bool {
+	return &v
+}
+
 // validate 验证配置有效性
 func validate(cfg *Config) error {
 	// 验证源配置
@@ -73,13 +77,13 @@ func validate(cfg *Config) error {
 	}
 
 	// CSVHasHeader 默认 true
-	if !cfg.Source.CSVHasHeader {
-		cfg.Source.CSVHasHeader = true
+	if cfg.Source.CSVHasHeader == nil {
+		cfg.Source.CSVHasHeader = newBool(true)
 	}
 
 	// FastFail 默认 true
-	if !cfg.Migration.FastFail {
-		cfg.Migration.FastFail = true
+	if cfg.Migration.FastFail == nil {
+		cfg.Migration.FastFail = newBool(true)
 	}
 
 	return nil

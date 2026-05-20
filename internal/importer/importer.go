@@ -169,7 +169,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	var headers []string
 	var firstRow []string // 无表头模式的第一行数据
 
-	if ti.cfg.Source.CSVHasHeader {
+	if ti.cfg.Source.CSVHasHeader != nil && *ti.cfg.Source.CSVHasHeader {
 		// 有表头模式：读取第一行作为表头
 		var err error
 		headers, err = reader.Read()
@@ -258,7 +258,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 
 	// 构建 CSV 列索引到有效列的映射（用于筛选数据）
 	var mapping []int
-	if ti.cfg.Source.CSVHasHeader {
+	if ti.cfg.Source.CSVHasHeader != nil && *ti.cfg.Source.CSVHasHeader {
 		// 有表头模式：按列名匹配
 		mapping = buildColumnMapping(headers, dbColumns)
 	} else {

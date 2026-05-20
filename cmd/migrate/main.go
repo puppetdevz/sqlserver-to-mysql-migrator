@@ -332,7 +332,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 			logger.Warnf("Failed to truncate table %s: %v", tableName, err)
 			tracker.FailPhaseItem()
 			failCount++
-			if cfg.Migration.FastFail {
+			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
 				stopErr := fmt.Errorf("failed to truncate table %s: %w", tableName, err)
 				migrationCtx.Stop(stopErr)
 				return stopErr
@@ -404,7 +404,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 			tracker.SkipPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
-			if cfg.Migration.FastFail {
+			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
 				migrationCtx.Stop(fmt.Errorf("table DDL not found: %s", tableName))
 				return fmt.Errorf("table DDL not found: %s", tableName)
 			}
@@ -419,7 +419,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 			tracker.FailPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
-			if cfg.Migration.FastFail {
+			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
 				migrationCtx.Stop(fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err))
 				return fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err)
 			}
@@ -433,7 +433,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 			tracker.FailPhaseItem()
 			failedTableNames = append(failedTableNames, tableName)
 			failCount++
-			if cfg.Migration.FastFail {
+			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
 				migrationCtx.Stop(fmt.Errorf("failed to create table %s: %w", tableName, err))
 				return fmt.Errorf("failed to create table %s: %w", tableName, err)
 			}
@@ -563,7 +563,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					logImportDiagnostic(diag)
 					tracker.FailTable(tableName, err.Error())
 					tracker.FailPhaseItem()
-					if cfg.Migration.FastFail {
+					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
 						stopErr := fmt.Errorf("failed to import table %s: %w", tableName, err)
 						migrationCtx.Stop(stopErr)
 						resultChan <- &importer.ImportResult{

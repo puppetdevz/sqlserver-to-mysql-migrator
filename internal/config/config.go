@@ -19,7 +19,7 @@ type SourceConfig struct {
 	DDLFile      string `yaml:"ddl_file"`
 	CSVDirectory string `yaml:"csv_directory"`
 	CSVTimestamp string `yaml:"csv_timestamp"`
-	CSVHasHeader bool   `yaml:"csv_has_header"` // CSV 文件是否包含表头，默认 true
+	CSVHasHeader *bool `yaml:"csv_has_header"` // CSV 文件是否包含表头，默认 true
 }
 
 // TargetConfig 目标数据库配置
@@ -37,7 +37,7 @@ type TargetConfig struct {
 
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
-	FastFail               bool   `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
+	FastFail               *bool  `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
 	TableNameCaseSensitive *bool  `yaml:"table_name_case_sensitive"`
 	BatchSize              int    `yaml:"batch_size"`
 	MaxWorkers             int    `yaml:"max_workers"`

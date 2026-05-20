@@ -40,6 +40,8 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 	var largeNvarcharCols []string
 	var largeVarcharCols []string
 
+	forceTextColumns := make(map[string]bool)
+
 	for _, column := range tableDDL.Columns {
 		cleanType := tc.typeMapper.CleanCollation(column.Type)
 		typePart := tc.extractType(cleanType)
@@ -47,7 +49,11 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 
 		// NVARCHAR(n)，n > 192
 		if matches := reNvarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
-			if n, _ := strconv.Atoi(matches[1]); n > 192 {
+			n, _ := strconv.Atoi(matches[1])
+			if n >= tc.config.IsEffectiveMaxNvarcharToTextSize() {
+				forceTextColumns[column.Name] = true
+			}
+			if n > 192 {
 				largeNvarcharCols = append(largeNvarcharCols, column.Name)
 			}
 			continue
@@ -55,7 +61,11 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 
 		// VARCHAR(n)，n > 256
 		if matches := reVarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
-			if n, _ := strconv.Atoi(matches[1]); n > 256 {
+			n, _ := strconv.Atoi(matches[1])
+			if n >= tc.config.IsEffectiveMaxVarcharToTextSize() {
+				forceTextColumns[column.Name] = true
+			}
+			if n > 256 {
 				largeVarcharCols = append(largeVarcharCols, column.Name)
 			}
 			continue
@@ -66,8 +76,6 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 	shouldConvertNvarchar := len(largeNvarcharCols) > tc.config.IsEffectiveMaxNvarcharToTextColumns()
 	shouldConvertVarchar := len(largeVarcharCols) > tc.config.IsEffectiveMaxVarcharToTextColumns()
 
-	// 构建强转列 map（仅在触发转换条件时迭代）
-	forceTextColumns := make(map[string]bool)
 	if shouldConvertNvarchar {
 		for _, col := range largeNvarcharCols {
 			forceTextColumns[col] = true

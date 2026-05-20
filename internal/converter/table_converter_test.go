@@ -118,3 +118,90 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertToMySQL_SizeThresholdConversion(t *testing.T) {
+	cfg := config.ConverterConfig{
+		MaxVarcharToTextColumns:  10,
+		MaxNvarcharToTextColumns: 10,
+		MaxNvarcharToTextSize:    500,
+		MaxVarcharToTextSize:     500,
+	}
+	tc := NewTableConverter(cfg)
+
+	t.Run("nvarchar(500) converts to TEXT by size", func(t *testing.T) {
+		cols := []parser.ColumnDef{
+			{Name: "col500", Type: "nvarchar(500) NULL", Nullable: true},
+		}
+		tableDDL := &parser.TableDDL{TableName: "t1", Columns: cols}
+		ddl, err := tc.ConvertToMySQL(tableDDL)
+		if err != nil {
+			t.Fatalf("ConvertToMySQL returned error: %v", err)
+		}
+		if !strings.Contains(ddl, "`col500` text") {
+			t.Errorf("DDL should contain `col500` text, got:\n%s", ddl)
+		}
+		if strings.Contains(ddl, "varchar(500)") {
+			t.Errorf("DDL should not contain varchar(500), got:\n%s", ddl)
+		}
+	})
+
+	t.Run("nvarchar(499) stays VARCHAR by size", func(t *testing.T) {
+		cols := []parser.ColumnDef{
+			{Name: "col499", Type: "nvarchar(499) NULL", Nullable: true},
+		}
+		tableDDL := &parser.TableDDL{TableName: "t2", Columns: cols}
+		ddl, err := tc.ConvertToMySQL(tableDDL)
+		if err != nil {
+			t.Fatalf("ConvertToMySQL returned error: %v", err)
+		}
+		if !strings.Contains(ddl, "varchar(499)") {
+			t.Errorf("DDL should contain varchar(499), got:\n%s", ddl)
+		}
+	})
+
+	t.Run("varchar(500) converts to TEXT by size", func(t *testing.T) {
+		cols := []parser.ColumnDef{
+			{Name: "vc500", Type: "varchar(500) NULL", Nullable: true},
+		}
+		tableDDL := &parser.TableDDL{TableName: "t3", Columns: cols}
+		ddl, err := tc.ConvertToMySQL(tableDDL)
+		if err != nil {
+			t.Fatalf("ConvertToMySQL returned error: %v", err)
+		}
+		if !strings.Contains(ddl, "`vc500` text") {
+			t.Errorf("DDL should contain `vc500` text, got:\n%s", ddl)
+		}
+	})
+
+	t.Run("varchar(499) stays VARCHAR by size", func(t *testing.T) {
+		cols := []parser.ColumnDef{
+			{Name: "vc499", Type: "varchar(499) NULL", Nullable: true},
+		}
+		tableDDL := &parser.TableDDL{TableName: "t4", Columns: cols}
+		ddl, err := tc.ConvertToMySQL(tableDDL)
+		if err != nil {
+			t.Fatalf("ConvertToMySQL returned error: %v", err)
+		}
+		if !strings.Contains(ddl, "varchar(499)") {
+			t.Errorf("DDL should contain varchar(499), got:\n%s", ddl)
+		}
+	})
+
+	t.Run("size OR count - size triggers even with few columns", func(t *testing.T) {
+		cols := []parser.ColumnDef{
+			{Name: "c1", Type: "nvarchar(500) NULL", Nullable: true},
+			{Name: "c2", Type: "nvarchar(500) NULL", Nullable: true},
+			{Name: "c3", Type: "nvarchar(500) NULL", Nullable: true},
+		}
+		tableDDL := &parser.TableDDL{TableName: "t5", Columns: cols}
+		ddl, err := tc.ConvertToMySQL(tableDDL)
+		if err != nil {
+			t.Fatalf("ConvertToMySQL returned error: %v", err)
+		}
+		for _, name := range []string{"c1", "c2", "c3"} {
+			if !strings.Contains(ddl, "`"+name+"` text") {
+				t.Errorf("DDL should contain `%s` text (size trigger), got:\n%s", name, ddl)
+			}
+		}
+	})
+}

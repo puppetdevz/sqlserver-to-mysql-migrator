@@ -60,8 +60,10 @@ type LoggingConfig struct {
 
 // ConverterConfig 类型转换器配置
 type ConverterConfig struct {
-	MaxVarcharToTextColumns   int `yaml:"max_varchar_to_text_columns"`    // 默认 10
-	MaxNvarcharToTextColumns  int `yaml:"max_nvarchar_to_text_columns"`   // 默认 10
+	MaxVarcharToTextColumns  int `yaml:"max_varchar_to_text_columns"`  // 默认 10
+	MaxNvarcharToTextColumns int `yaml:"max_nvarchar_to_text_columns"` // 默认 10
+	MaxNvarcharToTextSize    int `yaml:"max_nvarchar_to_text_size"`    // 默认 500
+	MaxVarcharToTextSize     int `yaml:"max_varchar_to_text_size"`     // 默认 500
 }
 
 // IsEffectiveMaxVarcharToTextColumns 返回有效阈值（0 时使用默认值 10）
@@ -78,6 +80,22 @@ func (c ConverterConfig) IsEffectiveMaxNvarcharToTextColumns() int {
 		return 10
 	}
 	return c.MaxNvarcharToTextColumns
+}
+
+// IsEffectiveMaxNvarcharToTextSize 返回有效阈值（0 时使用默认值 500）
+func (c ConverterConfig) IsEffectiveMaxNvarcharToTextSize() int {
+	if c.MaxNvarcharToTextSize <= 0 {
+		return 500
+	}
+	return c.MaxNvarcharToTextSize
+}
+
+// IsEffectiveMaxVarcharToTextSize 返回有效阈值（0 时使用默认值 500）
+func (c ConverterConfig) IsEffectiveMaxVarcharToTextSize() int {
+	if c.MaxVarcharToTextSize <= 0 {
+		return 500
+	}
+	return c.MaxVarcharToTextSize
 }
 
 // GetDSN 生成 MySQL DSN 连接字符串

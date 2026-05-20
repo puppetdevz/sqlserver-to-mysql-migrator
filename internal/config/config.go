@@ -41,11 +41,9 @@ type MigrationConfig struct {
 	TableNameCaseSensitive *bool  `yaml:"table_name_case_sensitive"`
 	BatchSize              int    `yaml:"batch_size"`
 	MaxWorkers             int    `yaml:"max_workers"`
-	EnableResume           bool   `yaml:"enable_resume"`
 	TruncateBeforeImport   bool   `yaml:"truncate_before_import"`
 	CreateMissingTables    bool   `yaml:"create_missing_tables"`
 	OnDuplicate            string `yaml:"on_duplicate"` // "replace" or "ignore"
-	StateDir               string `yaml:"state_dir"`
 }
 
 // LoggingConfig 日志配置

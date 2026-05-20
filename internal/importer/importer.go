@@ -1,7 +1,6 @@
 package importer
 
 import (
-	"bufio"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -77,7 +76,7 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	actualTableName := ti.conn.GetActualTableName(ti.tableName)
 
 	// 统计 CSV 总行数（用于进度显示）
-	csvTotalRows, err := countCSVRows(ti.csvPath)
+	csvTotalRows, err := countCSVRows(file)
 	if err != nil {
 		logger.Warnf("Failed to count CSV rows for %s: %v", ti.tableName, err)
 	}
@@ -93,19 +92,28 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 }
 
 // countCSVRows 统计 CSV 文件行数（用于进度显示）
-func countCSVRows(csvPath string) (int64, error) {
-	f, err := os.Open(csvPath)
-	if err != nil {
+func countCSVRows(f *os.File) (int64, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
+	reader := csv.NewReader(f)
 	var count int64
-	for scanner.Scan() {
+	for {
+		_, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return count, err
+		}
 		count++
 	}
-	return count, scanner.Err()
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return count, err
+	}
+	return count, nil
 }
 
 // getDBColumns 获取数据库中表的列

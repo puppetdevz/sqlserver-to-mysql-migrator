@@ -45,7 +45,6 @@ func NewTypeMapper() *TypeMapper {
 			"ntext":            "longtext",
 			"text":             "text",
 			"image":           "longblob",
-			"varbinary(max)": "longblob",
 			"varbinary":      "varbinary",
 			"uniqueidentifier": "char(36)",
 			"money":            "decimal(19,4)",
@@ -72,6 +71,11 @@ func (tm *TypeMapper) MapType(sqlServerType string) (string, error) {
 	// varchar(max) -> longtext
 	if sqlServerType == "varchar(max)" {
 		return "longtext", nil
+	}
+
+	// varbinary(max) -> longblob
+	if sqlServerType == "varbinary(max)" {
+		return "longblob", nil
 	}
 
 	// varchar(n) -> varchar(n)

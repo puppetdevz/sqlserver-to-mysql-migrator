@@ -286,6 +286,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		err      error
 	}
 
+	var csvDoneOnce sync.Once
 	csvDone := make(chan struct{})
 	batchChan := make(chan batchData, bufferSize)
 	resultChan := make(chan batchResult, bufferSize)
@@ -351,7 +352,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 					}
 					if err != nil {
 						logger.Errorf("CSV read error in %s at line %d: %v", ti.tableName, lineNum, err)
-						close(csvDone)
+						csvDoneOnce.Do(func() { close(csvDone) })
 						// 发送错误 batch 到 batchChan，让 DB writer 知道
 						select {
 						case batchChan <- batchData{batchNum: batchNum, err: err}:

@@ -287,13 +287,12 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 
 	csvDone := make(chan struct{})
 	batchChan := make(chan batchData, bufferSize)
+	resultChan := make(chan batchResult, bufferSize)
 
-	var totalRows int64
-	var processedRows int64
-	var errorCount int64
-	var batchNum int
-	var lineNum int
-	var lastErr error
+	// 获取 fast_fail 配置（闭包捕获，无需锁）
+	fastFail := ti.cfg.Migration.FastFail == nil || *ti.cfg.Migration.FastFail
+
+	var allErrors []error  // fast_fail=false 时收集所有错误
 	var wg sync.WaitGroup
 
 	// 启动 CSV 读取 goroutine
@@ -301,6 +300,9 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	go func(firstData []string) {
 		defer wg.Done()
 		defer close(batchChan)
+
+		var lineNum int
+		var batchNum int
 
 		for {
 			var batch [][]string
@@ -318,10 +320,13 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 						break
 					}
 					if err != nil {
-						lastErr = err
-						errorCount++
 						logger.Errorf("CSV read error in %s at line %d: %v", ti.tableName, lineNum, err)
 						close(csvDone)
+						// 发送错误 batch 到 batchChan，让 DB writer 知道
+						select {
+						case batchChan <- batchData{batchNum: batchNum, err: err}:
+						case <-csvDone:
+						}
 						return
 					}
 					batch = append(batch, row)
@@ -344,7 +349,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 
 			batchNum++
 			select {
-			case batchChan <- batchData{rows: processedBatch, batchNum: batchNum}:
+			case batchChan <- batchData{rows: processedBatch, batchNum: batchNum, err: nil}:
 			case <-csvDone:
 				return
 			}
@@ -357,9 +362,14 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 		defer wg.Done()
 
 		for bd := range batchChan {
+			// CSV 读取错误，跳过插入但传递结果
 			if bd.err != nil {
-				errorCount++
-				lastErr = bd.err
+				resultChan <- batchResult{
+					batchNum:     bd.batchNum,
+					rowCount:     len(bd.rows),
+					affectedRows: 0,
+					err:          bd.err,
+				}
 				continue
 			}
 
@@ -375,25 +385,51 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 				time.Sleep(time.Duration(retry+1) * retryDelayMs * time.Millisecond)
 			}
 
-			if insertErr != nil {
-				errorCount++
-				lastErr = insertErr
-				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
-				logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, maxRetries, insertErr)
-			} else {
-				processedRows += int64(len(bd.rows))
-				totalRows += affected
+			// 发送结果到 resultChan
+			resultChan <- batchResult{
+				batchNum:     bd.batchNum,
+				rowCount:     len(bd.rows),
+				affectedRows: affected,
+				err:          insertErr,
 			}
 
-			// 记录进度
-			if processedRows%50000 == 0 && processedRows > 0 {
-				logger.Infof("Progress: %d rows processed, %d rows inserted", processedRows, totalRows)
+			if insertErr != nil {
+				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
+				logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, maxRetries, insertErr)
 			}
 		}
 	}()
 
 	wg.Wait()
 	file.Close()
+
+	// 关闭 resultChan 表示不再有结果
+	close(resultChan)
+
+	// 从 resultChan 收集所有结果
+	var totalRows int64
+	var processedRows int64
+	var errorCount int64
+	var lastErr error
+
+	for result := range resultChan {
+		if result.err != nil {
+			errorCount++
+			lastErr = result.err
+			if !fastFail {
+				allErrors = append(allErrors, result.err)
+			}
+			// fast_fail=true 时，csvDone 已由 CSV reader 关闭，无需额外操作
+		} else {
+			processedRows += int64(result.rowCount)
+			totalRows += result.affectedRows
+		}
+
+		// 记录进度
+		if processedRows%50000 == 0 && processedRows > 0 {
+			logger.Infof("Progress: %d rows processed, %d rows inserted", processedRows, totalRows)
+		}
+	}
 
 	if lastErr != nil && processedRows == 0 {
 		return &ImportResult{

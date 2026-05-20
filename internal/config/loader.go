@@ -72,5 +72,15 @@ func validate(cfg *Config) error {
 		cfg.Logging.Level = "INFO" // 默认值
 	}
 
+	// CSVHasHeader 默认 true
+	if !cfg.Source.CSVHasHeader {
+		cfg.Source.CSVHasHeader = true
+	}
+
+	// FastFail 默认 true
+	if !cfg.Migration.FastFail {
+		cfg.Migration.FastFail = true
+	}
+
 	return nil
 }

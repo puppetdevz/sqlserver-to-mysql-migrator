@@ -97,7 +97,7 @@ func TestMigrationStateUpdateTableStatusCountsTrackedRunState(t *testing.T) {
 }
 
 func TestSetPlannedTotalTablesDoesNotDriftWhenAddingTables(t *testing.T) {
-	tracker, err := NewTracker(t.TempDir())
+	tracker, err := NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
@@ -126,7 +126,7 @@ func TestSetPlannedTotalTablesDoesNotDriftWhenAddingTables(t *testing.T) {
 }
 
 func TestSetPlannedTotalTablesResetsRunScopedOverallCounts(t *testing.T) {
-	tracker, err := NewTracker(t.TempDir())
+	tracker, err := NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
@@ -183,7 +183,7 @@ func TestSetPlannedTotalTablesResetsRunScopedOverallCounts(t *testing.T) {
 }
 
 func TestPhaseLifecycleUpdatesProgressInfo(t *testing.T) {
-	tracker, err := NewTracker(t.TempDir())
+	tracker, err := NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
@@ -323,7 +323,7 @@ func TestReportProgressWithoutPhaseTotalLogsOnlyOverall(t *testing.T) {
 }
 
 func TestStartTableDoesNotAdvanceOverallProgress(t *testing.T) {
-	tracker, err := NewTracker(t.TempDir())
+	tracker, err := NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}

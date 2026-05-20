@@ -23,7 +23,6 @@ import (
 
 var (
 	configPath    = flag.String("config", "configs/config.yaml", "配置文件路径")
-	resume        = flag.Bool("resume", false, "断点续传模式")
 	tables        = flag.String("tables", "", "仅导入指定表（逗号分隔）")
 	createOnly    = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
 	version       = flag.Bool("version", false, "显示版本信息")
@@ -120,7 +119,7 @@ func main() {
 	defer conn.Close()
 
 	// 初始化进度跟踪器
-	tracker, err := progress.NewTracker(cfg.Migration.StateDir)
+	tracker, err := progress.NewTracker()
 	if err != nil {
 		logger.Fatalf("Failed to initialize progress tracker: %v", err)
 	}
@@ -172,14 +171,12 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	}
 
 	// 检查断点续传
-	if *resume {
-		completedTables, err := tracker.GetCompletedTables()
-		if err != nil {
-			return fmt.Errorf("failed to get completed tables: %w", err)
-		}
-		logger.Infof("Resume mode: skipping %d completed tables", len(completedTables))
-		allTableNames = excludeTables(allTableNames, completedTables, tableMatcher)
+	completedTables, err := tracker.GetCompletedTables()
+	if err != nil {
+		return fmt.Errorf("failed to get completed tables: %w", err)
 	}
+	logger.Infof("Resume mode: skipping %d completed tables", len(completedTables))
+	allTableNames = excludeTables(allTableNames, completedTables, tableMatcher)
 
 	tracker.SetPlannedTotalTables(len(allTableNames))
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))

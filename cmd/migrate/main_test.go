@@ -9,7 +9,7 @@ import (
 )
 
 func TestCSVNotFoundShouldAdvanceOverallSkip(t *testing.T) {
-	tracker, err := progress.NewTracker(t.TempDir())
+	tracker, err := progress.NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
@@ -34,7 +34,7 @@ func TestCSVNotFoundShouldAdvanceOverallSkip(t *testing.T) {
 }
 
 func TestPartialImportShouldNotBeMarkedCompleted(t *testing.T) {
-	tracker, err := progress.NewTracker(t.TempDir())
+	tracker, err := progress.NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
@@ -62,7 +62,7 @@ func TestPartialImportShouldNotBeMarkedCompleted(t *testing.T) {
 }
 
 func TestCreateOnlyExpectedOverallClosure(t *testing.T) {
-	tracker, err := progress.NewTracker(t.TempDir())
+	tracker, err := progress.NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestCreateOnlyExpectedOverallClosure(t *testing.T) {
 }
 
 func TestFinalizeCreateOnlyProgressSkipsUncreatedMissingTablesWhenCreationDisabled(t *testing.T) {
-	tracker, err := progress.NewTracker(t.TempDir())
+	tracker, err := progress.NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}

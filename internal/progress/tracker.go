@@ -18,7 +18,12 @@ type Tracker struct {
 }
 
 // NewTracker 创建进度跟踪器
-func NewTracker(stateDir string) (*Tracker, error) {
+func NewTracker() (*Tracker, error) {
+	return NewTrackerWithStateDir("state")
+}
+
+// NewTrackerWithStateDir 创建进度跟踪器（指定状态目录）
+func NewTrackerWithStateDir(stateDir string) (*Tracker, error) {
 	store, err := NewSQLiteStore(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create state store: %w", err)

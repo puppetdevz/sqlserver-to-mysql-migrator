@@ -294,7 +294,6 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	// fast_fail 配置（闭包捕获，无需锁）
 	fastFail := ti.cfg.Migration.FastFail == nil || *ti.cfg.Migration.FastFail
 
-	// 共享状态（仅 aggregator goroutine 写入，main goroutine 读取）
 	var totalRows int64
 	var processedRows int64
 	var errorCount int64

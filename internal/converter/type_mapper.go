@@ -44,8 +44,9 @@ func NewTypeMapper() *TypeMapper {
 			"time":             "time",
 			"ntext":            "longtext",
 			"text":             "text",
-			"image":            "longblob",
-			"varbinary":        "varbinary",
+			"image":           "longblob",
+			"varbinary(max)": "longblob",
+			"varbinary":      "varbinary",
 			"uniqueidentifier": "char(36)",
 			"money":            "decimal(19,4)",
 			"smallmoney":       "decimal(10,4)",
@@ -66,6 +67,11 @@ func (tm *TypeMapper) MapType(sqlServerType string) (string, error) {
 		if matches := reNvarchar.FindStringSubmatch(sqlServerType); len(matches) > 0 {
 			return fmt.Sprintf("varchar(%s)", matches[1]), nil
 		}
+	}
+
+	// varchar(max) -> longtext
+	if sqlServerType == "varchar(max)" {
+		return "longtext", nil
 	}
 
 	// varchar(n) -> varchar(n)

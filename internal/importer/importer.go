@@ -153,6 +153,14 @@ func filterRowData(row []any, mapping []int) []interface{} {
 	return result
 }
 
+// batchResult 批次处理结果（从 DB writer → 主 goroutine）
+type batchResult struct {
+    batchNum     int
+    rowCount     int
+    affectedRows int64
+    err          error // nil=成功，非nil=错误
+}
+
 // pipelinedImport 流水线导入：边读边写
 func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) (*ImportResult, error, *ImportDiagnostic) {
 	reader := csv.NewReader(file)

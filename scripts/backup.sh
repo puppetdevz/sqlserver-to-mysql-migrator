@@ -58,7 +58,9 @@ do_backup() {
     local start_time=$(date +%s)
 
     if ! run_mysqldump "$backup_file"; then
-        rm -f "$backup_file"
+        if [[ -f "$backup_file" ]]; then
+            rm "$backup_file"
+        fi
         die "备份失败，请检查数据库连接和权限"
     fi
 

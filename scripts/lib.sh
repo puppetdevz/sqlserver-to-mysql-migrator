@@ -54,6 +54,7 @@ ensure_backup_dir() {
         die "备份目录是文件而非目录: $BACKUP_DIR"
     fi
     mkdir -p "$BACKUP_DIR" || die "无法创建备份目录: $BACKUP_DIR"
+    BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd)" || die "无法进入备份目录: $BACKUP_DIR"
 }
 
 # ========== 生成时间戳 ==========
@@ -86,7 +87,10 @@ find_latest_backup() {
     done
     shopt -u nullglob
 
-    [[ -n "$latest_file" ]] && echo "$latest_file"
+    if [[ -n "$latest_file" ]]; then
+        echo "$latest_file"
+    fi
+    return 0
 }
 
 # ========== 备份文件路径 ==========
@@ -101,15 +105,20 @@ run_mysqldump() {
     local output="$1"
 
     export MYSQL_PWD="$DB_PASS"
-    { mysqldump --host="$DB_HOST" \
-                --port="$DB_PORT" \
-                --user="$DB_USER" \
-                --single-transaction \
-                --quick \
-                --no-tablespaces \
-                --set-gtid-purged=OFF \
-                --add-drop-table \
-                "$DB_NAME"; } > "$output" 2>&1
+    mysqldump --host="$DB_HOST" \
+              --port="$DB_PORT" \
+              --user="$DB_USER" \
+              --default-character-set=utf8mb4 \
+              --single-transaction \
+              --quick \
+              --no-tablespaces \
+              --set-gtid-purged=OFF \
+              --add-drop-table \
+              --routines \
+              --events \
+              --triggers \
+              --hex-blob \
+              "$DB_NAME" > "$output"
     local status=$?
     unset MYSQL_PWD
 
@@ -150,16 +159,89 @@ get_all_tables() {
     return $status
 }
 
-# ========== 生成清空所有表的 SQL ==========
-# 用法: generate_drop_statements
-# 输出: DISABLE FOREIGN KEY CHECKS; DROP TABLE ...; ENABLE FOREIGN KEY CHECKS;
-generate_drop_statements() {
-    local tables
-    tables=$(get_all_tables) || return 1
+# ========== 获取数据库对象 ==========
+# 用法: get_schema_objects
+# 输出: 每行一个对象，格式为 TYPE<TAB>NAME
+get_schema_objects() {
+    export MYSQL_PWD="$DB_PASS"
+    mysql --host="$DB_HOST" \
+          --port="$DB_PORT" \
+          --user="$DB_USER" \
+          --database="$DB_NAME" \
+          --skip-column-names \
+          --batch \
+          --raw \
+          -e "
+SELECT object_type, object_name
+FROM (
+    SELECT 'VIEW' AS object_type, TABLE_NAME AS object_name
+      FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_TYPE = 'VIEW'
+    UNION ALL
+    SELECT 'TABLE' AS object_type, TABLE_NAME AS object_name
+      FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_TYPE = 'BASE TABLE'
+    UNION ALL
+    SELECT ROUTINE_TYPE AS object_type, ROUTINE_NAME AS object_name
+      FROM information_schema.ROUTINES
+     WHERE ROUTINE_SCHEMA = DATABASE()
+    UNION ALL
+    SELECT 'EVENT' AS object_type, EVENT_NAME AS object_name
+      FROM information_schema.EVENTS
+     WHERE EVENT_SCHEMA = DATABASE()
+) AS schema_objects
+ORDER BY CASE object_type
+    WHEN 'VIEW' THEN 1
+    WHEN 'TABLE' THEN 2
+    WHEN 'PROCEDURE' THEN 3
+    WHEN 'FUNCTION' THEN 4
+    WHEN 'EVENT' THEN 5
+    ELSE 6
+END, object_name;" 2>/dev/null
+    local status=$?
+    unset MYSQL_PWD
+    return $status
+}
 
-    echo "SET FOREIGN_KEY_CHECKS = 0;"
-    while IFS= read -r table; do
-        [[ -n "$table" ]] && echo "DROP TABLE IF EXISTS \`$table\`;"
-    done <<< "$tables"
-    echo "SET FOREIGN_KEY_CHECKS = 1;"
+# ========== MySQL 标识符转义 ==========
+quote_mysql_identifier() {
+    local identifier="$1"
+    identifier="${identifier//\`/\`\`}"
+    printf '`%s`' "$identifier"
+}
+
+# ========== 生成清空库内对象的 SQL ==========
+# 用法: generate_drop_statements [objects]
+# 输出: DROP VIEW/TABLE/PROCEDURE/FUNCTION/EVENT 语句
+generate_drop_statements() {
+    local objects="${1:-}"
+    if [[ $# -eq 0 ]]; then
+        objects=$(get_schema_objects) || return 1
+    fi
+
+    printf 'SET FOREIGN_KEY_CHECKS = 0;\n'
+    while IFS=$'\t' read -r object_type object_name; do
+        [[ -z "${object_type:-}" || -z "${object_name:-}" ]] && continue
+
+        case "$object_type" in
+            VIEW)
+                printf 'DROP VIEW IF EXISTS %s;\n' "$(quote_mysql_identifier "$object_name")"
+                ;;
+            TABLE)
+                printf 'DROP TABLE IF EXISTS %s;\n' "$(quote_mysql_identifier "$object_name")"
+                ;;
+            PROCEDURE)
+                printf 'DROP PROCEDURE IF EXISTS %s;\n' "$(quote_mysql_identifier "$object_name")"
+                ;;
+            FUNCTION)
+                printf 'DROP FUNCTION IF EXISTS %s;\n' "$(quote_mysql_identifier "$object_name")"
+                ;;
+            EVENT)
+                printf 'DROP EVENT IF EXISTS %s;\n' "$(quote_mysql_identifier "$object_name")"
+                ;;
+        esac
+    done <<< "$objects"
+    printf 'SET FOREIGN_KEY_CHECKS = 1;\n'
 }

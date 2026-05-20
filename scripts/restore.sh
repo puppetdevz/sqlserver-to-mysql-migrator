@@ -26,6 +26,9 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --timestamp)
+                if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+                    die "--timestamp 需要提供 YYYYMMDDHHMM"
+                fi
                 BACKUP_TIMESTAMP="$2"
                 shift 2
                 ;;
@@ -52,7 +55,7 @@ EOF
                 exit 0
                 ;;
             *)
-                shift
+                die "未知参数: $1"
                 ;;
         esac
     done
@@ -63,7 +66,10 @@ find_backup_file() {
     local ts="$1"
     local path
     path=$(backup_file_path "$ts")
-    [[ -f "$path" ]] && echo "$path"
+    if [[ -f "$path" ]]; then
+        echo "$path"
+    fi
+    return 0
 }
 
 # ========== 前置检查 ==========
@@ -86,32 +92,50 @@ check_prerequisites() {
     fi
 }
 
-# ========== 清空所有表 ==========
-drop_all_tables() {
-    local sql
-    sql=$(generate_drop_statements) || die "获取表列表失败"
+# ========== 输出待删除对象 ==========
+print_schema_objects() {
+    local objects="$1"
 
-    echo_info "即将删除以下表:"
-    echo "$sql" | grep "DROP TABLE" | sed "s/DROP TABLE IF EXISTS //;s/;//" | while read -r table; do
-        echo "  - $table"
-    done
-
-    if [[ "$DRY_RUN" == true ]]; then
-        echo_warn "[Dry Run] 跳过实际删除操作"
+    if [[ -z "$objects" ]]; then
+        echo_info "当前数据库没有需要清理的对象"
         return 0
     fi
 
-    echo_step "Restore" "清空数据库 $DB_NAME 中的所有表..."
+    echo_info "即将删除以下对象:"
+    while IFS=$'\t' read -r object_type object_name; do
+        [[ -z "${object_type:-}" || -z "${object_name:-}" ]] && continue
+        printf '  - %-9s %s\n' "$object_type" "$object_name"
+    done <<< "$objects"
+}
+
+# ========== 清空库内对象 ==========
+drop_schema_objects() {
+    local objects
+    objects=$(get_schema_objects) || die "获取数据库对象列表失败"
+
+    local sql
+    sql=$(generate_drop_statements "$objects") || die "生成清理 SQL 失败"
+
+    print_schema_objects "$objects"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo_warn "[Dry Run] 跳过实际清理操作"
+        return 0
+    fi
+
+    echo_step "Restore" "清空数据库 $DB_NAME 中的库内对象..."
     export MYSQL_PWD="$DB_PASS"
-    echo "$sql" | mysql --host="$DB_HOST" \
-                        --port="$DB_PORT" \
-                        --user="$DB_USER" \
-                        --database="$DB_NAME" \
-                        --default-character-set=utf8mb4 2>&1
-    local status=$?
+    local status=0
+    printf '%s\n' "$sql" | mysql --host="$DB_HOST" \
+                                  --port="$DB_PORT" \
+                                  --user="$DB_USER" \
+                                  --database="$DB_NAME" \
+                                  --default-character-set=utf8mb4 2>&1 || status=$?
     unset MYSQL_PWD
 
-    [[ $status -ne 0 ]] && die "清空表失败"
+    if [[ $status -ne 0 ]]; then
+        die "清空库内对象失败"
+    fi
 }
 
 # ========== 恢复函数 ==========
@@ -139,7 +163,7 @@ do_restore() {
 main() {
     parse_args "$@"
     check_prerequisites
-    drop_all_tables
+    drop_schema_objects
     do_restore
 }
 

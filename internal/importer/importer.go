@@ -427,6 +427,9 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 			if insertErr != nil {
 				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
 				logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, maxRetries, insertErr)
+				if fastFail {
+					csvDoneOnce.Do(func() { close(csvDone) })
+				}
 			}
 		}
 	}()

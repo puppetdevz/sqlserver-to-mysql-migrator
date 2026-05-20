@@ -574,7 +574,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					if err := tracker.FailTable(tableName, fmt.Sprintf("partial import: %d row errors", result.ErrorCount)); err != nil {
 						logger.Warnf("[Worker %d] Failed to mark table %s as failed: %v", workerID, tableName, err)
 					}
-					tracker.CompletePhaseItem()
+					tracker.FailPhaseItem()
 					resultChan <- result
 				}
 			}

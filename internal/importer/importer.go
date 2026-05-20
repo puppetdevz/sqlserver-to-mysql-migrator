@@ -289,12 +289,42 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	csvDone := make(chan struct{})
 	batchChan := make(chan batchData, bufferSize)
 	resultChan := make(chan batchResult, bufferSize)
+	aggregatorDone := make(chan struct{})
 
 	// fast_fail 配置（闭包捕获，无需锁）
 	fastFail := ti.cfg.Migration.FastFail == nil || *ti.cfg.Migration.FastFail
 
-	var allErrors []error  // fast_fail=false 时收集所有错误
+	// 共享状态（仅 aggregator goroutine 写入，main goroutine 读取）
+	var totalRows int64
+	var processedRows int64
+	var errorCount int64
+	var lastErr error
+	var allErrors []error
 	var wg sync.WaitGroup
+
+	// 启动结果聚合 goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(aggregatorDone)
+
+		for result := range resultChan {
+			if result.err != nil {
+				errorCount++
+				lastErr = result.err
+				if !fastFail {
+					allErrors = append(allErrors, result.err)
+				}
+			} else {
+				processedRows += int64(result.rowCount)
+				totalRows += result.affectedRows
+			}
+
+			if processedRows%50000 == 0 && processedRows > 0 {
+				logger.Infof("Progress: %d rows processed, %d rows inserted", processedRows, totalRows)
+			}
+		}
+	}()
 
 	// 启动 CSV 读取 goroutine
 	wg.Add(1)
@@ -403,33 +433,11 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 
 	wg.Wait()
 
+	// 等待 aggregator goroutine 完成
+	<-aggregatorDone
+
 	// 关闭 resultChan 表示不再有结果
 	close(resultChan)
-
-	// 从 resultChan 收集所有结果
-	var totalRows int64
-	var processedRows int64
-	var errorCount int64
-	var lastErr error
-
-	for result := range resultChan {
-		if result.err != nil {
-			errorCount++
-			lastErr = result.err
-			if !fastFail {
-				allErrors = append(allErrors, result.err)
-			}
-			// fast_fail=true 时，csvDone 已由 CSV reader 关闭，无需额外操作
-		} else {
-			processedRows += int64(result.rowCount)
-			totalRows += result.affectedRows
-		}
-
-		// 记录进度
-		if processedRows%50000 == 0 && processedRows > 0 {
-			logger.Infof("Progress: %d rows processed, %d rows inserted", processedRows, totalRows)
-		}
-	}
 
 	if lastErr != nil && processedRows == 0 {
 		return &ImportResult{

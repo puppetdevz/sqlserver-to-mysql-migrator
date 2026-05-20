@@ -8,63 +8,21 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 )
 
-// Tracker 进度跟踪器
+// Tracker 进度跟踪器（仅内存追踪，无持久化）
 type Tracker struct {
-	store  *SQLiteStore
 	state  *MigrationState
 	mu     sync.RWMutex
 	ticker *time.Ticker
 	done   chan bool
 }
 
-// NewTracker 创建进度跟踪器
+// NewTracker 创建进度跟踪器（无持久化）
 func NewTracker() (*Tracker, error) {
-	return NewTrackerWithStateDir("state")
-}
-
-// NewTrackerWithStateDir 创建进度跟踪器（指定状态目录）
-func NewTrackerWithStateDir(stateDir string) (*Tracker, error) {
-	store, err := NewSQLiteStore(stateDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create state store: %w", err)
-	}
-
-	// 尝试加载已有状态
-	state, err := loadOrCreateState(store)
-	if err != nil {
-		store.Close()
-		return nil, fmt.Errorf("failed to load state: %w", err)
-	}
-
 	tracker := &Tracker{
-		store: store,
-		state: state,
+		state: NewMigrationState(),
 		done:  make(chan bool),
 	}
-
 	return tracker, nil
-}
-
-// loadOrCreateState 加载或创建状态
-func loadOrCreateState(store *SQLiteStore) (*MigrationState, error) {
-	// 尝试从存储加载
-	states, err := store.GetAllTableStates()
-	if err != nil {
-		return nil, err
-	}
-
-	if len(states) == 0 {
-		// 创建新状态
-		return NewMigrationState(), nil
-	}
-
-	// 重建状态
-	state := NewMigrationState()
-	state.Tables = states
-
-	logger.Infof("Loaded existing state: %d tables", len(states))
-
-	return state, nil
 }
 
 // Close 关闭跟踪器
@@ -73,7 +31,7 @@ func (t *Tracker) Close() error {
 		t.ticker.Stop()
 		t.done <- true
 	}
-	return t.store.Close()
+	return nil
 }
 
 // StartTable 开始处理表
@@ -92,7 +50,7 @@ func (t *Tracker) StartTable(tableName string, csvPath string, tableExists bool)
 	state.CSVPath = csvPath
 	state.TableExists = tableExists
 
-	return t.store.SaveTableState(state)
+	return nil
 }
 
 // CompleteTable 完成表处理
@@ -115,7 +73,7 @@ func (t *Tracker) CompleteTable(tableName string, processedRows, insertedRows, e
 
 	t.state.UpdateTableStatus(tableName, StatusCompleted)
 
-	return t.store.SaveTableState(state)
+	return nil
 }
 
 // MarkTableCreated 记录建表成功，但不推进 overall 最终完成计数
@@ -133,7 +91,7 @@ func (t *Tracker) MarkTableCreated(tableName string) error {
 	state.EndTime = time.Now()
 	state.DurationMs = state.EndTime.Sub(state.StartTime).Milliseconds()
 
-	return t.store.SaveTableState(state)
+	return nil
 }
 
 // FailTable 标记表处理失败
@@ -154,7 +112,7 @@ func (t *Tracker) FailTable(tableName string, errorMessage string) error {
 
 	t.state.UpdateTableStatus(tableName, StatusFailed)
 
-	return t.store.SaveTableState(state)
+	return nil
 }
 
 // SkipTable 跳过表处理
@@ -174,7 +132,7 @@ func (t *Tracker) SkipTable(tableName string, reason string) error {
 
 	t.state.UpdateTableStatus(tableName, StatusSkipped)
 
-	return t.store.SaveTableState(state)
+	return nil
 }
 
 // GetTableState 获取表状态
@@ -183,11 +141,6 @@ func (t *Tracker) GetTableState(tableName string) *TableState {
 	defer t.mu.RUnlock()
 
 	return t.state.GetTable(tableName)
-}
-
-// GetCompletedTables 获取已完成的表列表
-func (t *Tracker) GetCompletedTables() ([]string, error) {
-	return t.store.GetCompletedTables()
 }
 
 // GetProgress 获取进度信息
@@ -350,5 +303,5 @@ func (t *Tracker) Clear() error {
 	defer t.mu.Unlock()
 
 	t.state = NewMigrationState()
-	return t.store.Clear()
+	return nil
 }

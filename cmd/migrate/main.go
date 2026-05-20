@@ -170,14 +170,6 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		logger.Infof("Filtered to %d specified tables", len(allTableNames))
 	}
 
-	// 检查断点续传
-	completedTables, err := tracker.GetCompletedTables()
-	if err != nil {
-		return fmt.Errorf("failed to get completed tables: %w", err)
-	}
-	logger.Infof("Resume mode: skipping %d completed tables", len(completedTables))
-	allTableNames = excludeTables(allTableNames, completedTables, tableMatcher)
-
 	tracker.SetPlannedTotalTables(len(allTableNames))
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 

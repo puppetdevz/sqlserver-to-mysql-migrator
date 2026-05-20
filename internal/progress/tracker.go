@@ -143,6 +143,19 @@ func (t *Tracker) GetTableState(tableName string) *TableState {
 	return t.state.GetTable(tableName)
 }
 
+// UpdateTableProgress 更新表进度（由主 goroutine 调用）
+func (t *Tracker) UpdateTableProgress(tableName string, processedRows, insertedRows int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state := t.state.GetTable(tableName)
+	if state == nil {
+		return
+	}
+	state.ProcessedRows = processedRows
+	state.InsertedRows = insertedRows
+}
+
 // GetProgress 获取进度信息
 func (t *Tracker) GetProgress() ProgressInfo {
 	t.mu.RLock()
@@ -263,6 +276,19 @@ func (t *Tracker) reportProgress() {
 	logger.Infof("Overall: %.2f%% (%d/%d tables) - Completed: %d, Failed: %d, Skipped: %d",
 		info.Progress, overallProcessed, info.TotalTables,
 		info.CompletedCount, info.FailedCount, info.SkippedCount)
+
+	// 打印每个活跃表的行级进度
+	activeTables := t.state.GetActiveTables()
+	if len(activeTables) > 0 {
+		logger.Info("Table import progress:")
+		for name, p := range activeTables {
+			if p.TotalRows > 0 {
+				logger.Infof("  - %s: %d/%d rows (%.1f%%)", name, p.ProcessedRows, p.TotalRows, p.Percent)
+			} else {
+				logger.Infof("  - %s: %d rows inserted", name, p.InsertedRows)
+			}
+		}
+	}
 }
 
 // PrintSummary 打印摘要

@@ -70,6 +70,7 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open CSV file: %w", err), nil
 	}
+	defer file.Close()
 
 	// 获取正确大小写的表名（解决 MySQL 大小写不敏感问题）
 	actualTableName := ti.conn.GetActualTableName(ti.tableName)

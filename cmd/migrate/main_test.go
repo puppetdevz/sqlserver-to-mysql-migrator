@@ -143,26 +143,6 @@ func TestFilterTablesCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestExcludeTablesCaseSensitive(t *testing.T) {
-	tableMatcher := matcher.NewTableNameMatcher(true)
-
-	got := excludeTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
-
-	if len(got) != 1 || got[0] != "SAMPLE_MAIN_102" {
-		t.Fatalf("excludeTables() = %v, want [SAMPLE_MAIN_102]", got)
-	}
-}
-
-func TestExcludeTablesCaseInsensitive(t *testing.T) {
-	tableMatcher := matcher.NewTableNameMatcher(false)
-
-	got := excludeTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
-
-	if len(got) != 0 {
-		t.Fatalf("excludeTables() = %v, want empty", got)
-	}
-}
-
 func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *testing.T) {
 	allDDLs := map[string]*parser.TableDDL{
 		"SAMPLE_MAIN_101$": {TableName: "sample_main_101$"},

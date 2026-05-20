@@ -248,20 +248,6 @@ func filterTables(allTables []string, specifiedTables []string, tableMatcher mat
 	return filtered
 }
 
-// excludeTables 排除表列表
-func excludeTables(allTables []string, excludedTables []string, tableMatcher matcher.TableNameMatcher) []string {
-	excludedSet := tableMatcher.BuildSet(excludedTables)
-
-	var filtered []string
-	for _, table := range allTables {
-		if _, ok := excludedSet[tableMatcher.Key(table)]; !ok {
-			filtered = append(filtered, table)
-		}
-	}
-
-	return filtered
-}
-
 func collectDDLTableNames(allDDLs map[string]*parser.TableDDL) []string {
 	tableNames := make([]string, 0, len(allDDLs))
 	for _, tableDDL := range allDDLs {

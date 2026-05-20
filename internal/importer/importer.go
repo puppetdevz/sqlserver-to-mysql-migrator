@@ -442,11 +442,11 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string) 
 	// 关闭 resultChan 表示不再有结果
 	close(resultChan)
 
-	if lastErr != nil && processedRows == 0 {
+	if fastFail && lastErr != nil {
 		return &ImportResult{
 			TableName:     ti.tableName,
-			ProcessedRows: 0,
-			InsertedRows:  0,
+			ProcessedRows: processedRows,
+			InsertedRows:  totalRows,
 			ErrorCount:    errorCount,
 			Success:       false,
 			ErrorMessage:  lastErr.Error(),

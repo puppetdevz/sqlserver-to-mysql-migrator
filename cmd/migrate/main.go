@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
@@ -291,39 +292,60 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 	tracker.StartPhase("truncate-existing-tables", len(existingTables))
 	defer tracker.ClearPhase()
 
-	successCount := 0
-	failCount := 0
+	n := len(existingTables)
+	tableChan := make(chan string, n)
 
-	for i, tableName := range existingTables {
-		// 检查是否已收到停止信号
-		select {
-		case <-migrationCtx.Context().Done():
-			logger.Warn("Migration stopped, aborting truncate phase")
-			return migrationCtx.Err()
-		default:
-		}
+	var wg sync.WaitGroup
+	var totalSuccess atomic.Int64
+	var totalFail atomic.Int64
 
-		if err := conn.TruncateTable(tableName); err != nil {
-			logger.Warnf("Failed to truncate table %s: %v", tableName, err)
-			tracker.FailPhaseItem()
-			failCount++
-			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-				stopErr := fmt.Errorf("failed to truncate table %s: %w", tableName, err)
-				migrationCtx.Stop(stopErr)
-				return stopErr
+	// 启动 workers
+	for i := 0; i < cfg.Migration.MaxWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for tableName := range tableChan {
+				select {
+				case <-migrationCtx.Context().Done():
+					return
+				default:
+				}
+
+				if err := conn.TruncateTable(tableName); err != nil {
+					logger.Warnf("Failed to truncate table %s: %v", tableName, err)
+					tracker.FailPhaseItem()
+					totalFail.Add(1)
+					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
+						migrationCtx.Stop(fmt.Errorf("failed to truncate table %s: %w", tableName, err))
+						return
+					}
+				} else {
+					tracker.CompletePhaseItem()
+					totalSuccess.Add(1)
+				}
 			}
-		} else {
-			tracker.CompletePhaseItem()
-			successCount++
-		}
-
-		// 每 100 张表输出一次进度
-		if (i+1)%100 == 0 {
-			logger.Infof("Truncate progress: %d/%d (success: %d, failed: %d)",
-				i+1, len(existingTables), successCount, failCount)
-		}
+		}(i)
 	}
 
+	// 分发任务
+	for _, tableName := range existingTables {
+		select {
+		case <-migrationCtx.Context().Done():
+			break
+		case tableChan <- tableName:
+		}
+	}
+	close(tableChan)
+
+	wg.Wait()
+
+	// context 停止且有错误时返回
+	if err := migrationCtx.Err(); err != nil {
+		return err
+	}
+
+	failCount := int(totalFail.Load())
+	successCount := int(totalSuccess.Load())
 	logger.Infof("Truncate completed: %d success, %d failed", successCount, failCount)
 
 	if failCount > 0 {

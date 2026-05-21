@@ -205,3 +205,85 @@ func TestConvertToMySQL_SizeThresholdConversion(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertToMySQL_RowSizeGuardConvertsManyMediumVarchars(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  10,
+		MaxNvarcharToTextColumns: 10,
+		MaxNvarcharToTextSize:    500,
+		MaxVarcharToTextSize:     500,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+	}
+	for i := 0; i < 180; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     "field" + strconv.Itoa(i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName: "wide_table",
+		Columns:   cols,
+		PrimaryKey: &parser.PrimaryKeyDef{
+			Name:    "PK_wide_table",
+			Columns: []string{"ID"},
+		},
+	}
+
+	ddl, err := tc.ConvertToMySQL(tableDDL)
+	if err != nil {
+		t.Fatalf("ConvertToMySQL returned error: %v", err)
+	}
+	if !strings.Contains(ddl, "`field0` text") {
+		t.Fatalf("DDL should convert some medium varchar columns to text, got:\n%s", ddl)
+	}
+	if !strings.Contains(ddl, "`ID` bigint NOT NULL") || !strings.Contains(ddl, "PRIMARY KEY (`ID`)") {
+		t.Fatalf("DDL should keep primary key column inline and indexed, got:\n%s", ddl)
+	}
+}
+
+func TestConvertToMySQL_RowSizeGuardKeepsIndexedColumnsInline(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  10,
+		MaxNvarcharToTextColumns: 10,
+		MaxNvarcharToTextSize:    500,
+		MaxVarcharToTextSize:     500,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+		{Name: "indexed_code", Type: "nvarchar(100) NULL", Nullable: true},
+	}
+	for i := 0; i < 180; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     "field" + strconv.Itoa(i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName: "wide_table",
+		Columns:   cols,
+		PrimaryKey: &parser.PrimaryKeyDef{
+			Name:    "PK_wide_table",
+			Columns: []string{"ID"},
+		},
+		Indexes: []parser.IndexDef{
+			{Name: "IDX_indexed_code", Columns: []string{"indexed_code"}},
+		},
+	}
+
+	ddl, err := tc.ConvertToMySQL(tableDDL)
+	if err != nil {
+		t.Fatalf("ConvertToMySQL returned error: %v", err)
+	}
+	if !strings.Contains(ddl, "`indexed_code` varchar(100) NULL") {
+		t.Fatalf("DDL should keep indexed string column inline, got:\n%s", ddl)
+	}
+	if !strings.Contains(ddl, "CREATE INDEX `IDX_indexed_code` ON `wide_table` (`indexed_code`);") {
+		t.Fatalf("DDL should keep index on indexed_code, got:\n%s", ddl)
+	}
+}

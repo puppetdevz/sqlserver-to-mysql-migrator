@@ -9,11 +9,11 @@ import (
 
 // TableDDL 表 DDL 定义
 type TableDDL struct {
-	TableName   string
-	Columns     []ColumnDef
-	PrimaryKey  *PrimaryKeyDef
-	Indexes     []IndexDef
-	RawDDL      string
+	TableName  string
+	Columns    []ColumnDef
+	PrimaryKey *PrimaryKeyDef
+	Indexes    []IndexDef
+	RawDDL     string
 }
 
 // ColumnDef 列定义
@@ -228,10 +228,11 @@ func (p *DDLParser) parseColumn(line string) *ColumnDef {
 		return nil
 	}
 
-	columnName := parts[0]
+	rawColumnName := parts[0]
+	columnName := cleanIdentifier(rawColumnName)
 
 	// 提取类型（可能包含括号和参数）
-	typeStart := len(columnName) + 1
+	typeStart := len(rawColumnName) + 1
 	typePart := strings.TrimSpace(line[typeStart:])
 
 	// 移除 DEFAULT 值部分（如 "datetime DEFAULT '1753-01-01 00:00:00' NOT NULL" -> "datetime NOT NULL"）
@@ -263,7 +264,7 @@ func (p *DDLParser) parsePrimaryKey(line string) *PrimaryKeyDef {
 	columnsStr := matches[2]
 	columns := strings.Split(columnsStr, ",")
 	for i := range columns {
-		columns[i] = strings.TrimSpace(columns[i])
+		columns[i] = cleanIdentifier(columns[i])
 	}
 
 	return &PrimaryKeyDef{
@@ -312,13 +313,9 @@ func (p *DDLParser) parseIndex(line string) *IndexDef {
 	}
 	columnsStr := matches[1]
 
-	// 移除 ASC/DESC
-	columnsStr = strings.ReplaceAll(columnsStr, "ASC", "")
-	columnsStr = strings.ReplaceAll(columnsStr, "DESC", "")
-
 	columns := strings.Split(columnsStr, ",")
 	for i := range columns {
-		columns[i] = strings.TrimSpace(columns[i])
+		columns[i] = cleanIndexColumn(columns[i])
 	}
 
 	return &IndexDef{
@@ -326,4 +323,19 @@ func (p *DDLParser) parseIndex(line string) *IndexDef {
 		Columns: columns,
 		Unique:  unique,
 	}
+}
+
+func cleanIdentifier(identifier string) string {
+	identifier = strings.TrimSpace(identifier)
+	identifier = strings.Trim(identifier, "[]")
+	return strings.TrimSpace(identifier)
+}
+
+func cleanIndexColumn(column string) string {
+	fields := strings.Fields(strings.TrimSpace(column))
+	if len(fields) == 0 {
+		return ""
+	}
+	name := fields[0]
+	return cleanIdentifier(name)
 }

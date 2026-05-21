@@ -3,12 +3,18 @@ package importer
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 )
 
 // maxPreparedPlaceholders MySQL prepared statement 占位符上限（留有余量）
 const maxPreparedPlaceholders = 60000
+
+var reDataTooLongColumn = regexp.MustCompile(`Data too long for column '([^']+)'`)
+var reIncorrectTemporalColumn = regexp.MustCompile(`Incorrect (?:date|datetime|time|timestamp) value: .* for column '([^']+)'`)
+var reIncorrectNumericColumn = regexp.MustCompile(`Incorrect (?:integer|decimal|double|float) value: .* for column '([^']+)'`)
+var reOutOfRangeColumn = regexp.MustCompile(`Out of range value for column '([^']+)'`)
 
 // BatchInserter 批量插入器
 type BatchInserter struct {
@@ -64,12 +70,12 @@ func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []st
 	}
 
 	return &BatchInserter{
-		db:           db,
-		tableName:    tableName,
+		db:          db,
+		tableName:   tableName,
 		columns:     validColumns,
 		batchSize:   batchSize,
-		onDuplicate:  onDuplicate,
-		skippedCols:  skippedColumns,
+		onDuplicate: onDuplicate,
+		skippedCols: skippedColumns,
 	}, skippedColumns
 }
 
@@ -131,15 +137,10 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 
 		if cachedCapacity > 0 && len(rows) < cachedCapacity {
 			// cached stmt expects more placeholders than we have rows — close old stmt and create new one
-			bi.stmtMu.Lock()
-			if bi.stmt != nil {
-				bi.stmt.Close()
-				bi.stmt = nil
-			}
-			bi.stmtMu.Unlock()
-			return bi.insertBatchSingle(rows, false)
+			bi.resetStmt()
+			return bi.insertBatchSingleWithAutoWiden(rows, false)
 		}
-		return bi.insertBatchSingle(rows, true) // 单批次，可缓存
+		return bi.insertBatchSingleWithAutoWiden(rows, true) // 单批次，可缓存
 	}
 
 	// 拆分为多个小批次（各批次行数可能不同，不缓存以避免占位符数量不匹配）
@@ -149,13 +150,154 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 		if end > len(rows) {
 			end = len(rows)
 		}
-		affected, err := bi.insertBatchSingle(rows[i:end], false) // 拆分的批次，不缓存
+		affected, err := bi.insertBatchSingleWithAutoWiden(rows[i:end], false) // 拆分的批次，不缓存
 		if err != nil {
 			return totalAffected, err
 		}
 		totalAffected += affected
 	}
 	return totalAffected, nil
+}
+
+func (bi *BatchInserter) insertBatchSingleWithAutoWiden(rows [][]interface{}, canCache bool) (int64, error) {
+	affected, err := bi.insertBatchSingle(rows, canCache)
+	if err == nil {
+		return affected, nil
+	}
+
+	column, ok := autoTextColumn(err)
+	if !ok {
+		return 0, err
+	}
+
+	if widenErr := bi.widenColumnToText(column); widenErr != nil {
+		return 0, fmt.Errorf("%w; failed to widen column %s: %v", err, column, widenErr)
+	}
+	bi.resetStmt()
+
+	return bi.insertBatchSingle(rows, canCache)
+}
+
+func autoTextColumn(err error) (string, bool) {
+	if column, ok := dataTooLongColumn(err); ok {
+		return column, true
+	}
+	if column, ok := incorrectTemporalColumn(err); ok {
+		return column, true
+	}
+	if column, ok := incorrectNumericColumn(err); ok {
+		return column, true
+	}
+	return outOfRangeColumn(err)
+}
+
+func dataTooLongColumn(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	matches := reDataTooLongColumn.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+func incorrectTemporalColumn(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	matches := reIncorrectTemporalColumn.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+func incorrectNumericColumn(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	matches := reIncorrectNumericColumn.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+func outOfRangeColumn(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	matches := reOutOfRangeColumn.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+func (bi *BatchInserter) widenColumnToText(column string) error {
+	var dataType, isNullable, columnKey string
+	err := bi.db.QueryRow(`
+SELECT DATA_TYPE, IS_NULLABLE, COLUMN_KEY
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
+`, bi.tableName, column).Scan(&dataType, &isNullable, &columnKey)
+	if err != nil {
+		return fmt.Errorf("failed to inspect column metadata: %w", err)
+	}
+	if columnKey != "" {
+		return fmt.Errorf("column is indexed (%s)", columnKey)
+	}
+
+	nextType, ok := widenedTextType(dataType)
+	if !ok {
+		return fmt.Errorf("column type %s is not auto-widenable", dataType)
+	}
+
+	nullability := "NULL"
+	if strings.EqualFold(isNullable, "NO") {
+		nullability = "NOT NULL"
+	}
+
+	query := fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s %s",
+		quoteIdentifier(bi.tableName),
+		quoteIdentifier(column),
+		nextType,
+		nullability,
+	)
+	if _, err := bi.db.Exec(query); err != nil {
+		return fmt.Errorf("failed to alter column: %w", err)
+	}
+	return nil
+}
+
+func widenedTextType(dataType string) (string, bool) {
+	switch strings.ToLower(dataType) {
+	case "char", "varchar", "tinytext", "date", "datetime", "timestamp", "time", "year":
+		return "TEXT", true
+	case "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric", "float", "double", "real":
+		return "TEXT", true
+	case "text":
+		return "MEDIUMTEXT", true
+	case "mediumtext":
+		return "LONGTEXT", true
+	default:
+		return "", false
+	}
+}
+
+func quoteIdentifier(identifier string) string {
+	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
+}
+
+func (bi *BatchInserter) resetStmt() {
+	bi.stmtMu.Lock()
+	defer bi.stmtMu.Unlock()
+	if bi.stmt != nil {
+		bi.stmt.Close()
+		bi.stmt = nil
+	}
+	bi.cachedRows = 0
 }
 
 // insertBatchSingle 执行单次插入

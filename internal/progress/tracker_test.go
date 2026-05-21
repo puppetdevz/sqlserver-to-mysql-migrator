@@ -3,7 +3,9 @@ package progress
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
@@ -259,6 +261,49 @@ func TestReportProgressWithActivePhaseLogsPhaseAndOverall(t *testing.T) {
 	}
 }
 
+func TestReportProgressDoesNotRaceWithTableUpdates(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "progress.log")
+	if err := logger.Init("INFO", logPath, false, 1, 1, 1); err != nil {
+		t.Fatalf("logger.Init() error = %v", err)
+	}
+
+	tracker, err := NewTracker()
+	if err != nil {
+		t.Fatalf("NewTracker() error = %v", err)
+	}
+	defer tracker.Close()
+
+	tracker.SetPlannedTotalTables(200)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			tableName := "table_" + strconv.Itoa(i)
+			if err := tracker.StartTable(tableName, "/tmp/"+tableName+".csv", false); err != nil {
+				t.Errorf("StartTable(%s) error = %v", tableName, err)
+				return
+			}
+			tracker.UpdateTableProgress(tableName, int64(i), int64(i))
+			if err := tracker.MarkTableCreated(tableName); err != nil {
+				t.Errorf("MarkTableCreated(%s) error = %v", tableName, err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			tracker.reportProgress()
+		}
+	}()
+
+	wg.Wait()
+}
+
 func TestReportProgressWithoutPhaseLogsOnlyOverall(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "progress.log")
 	if err := logger.Init("INFO", logPath, false, 1, 1, 1); err != nil {
@@ -345,6 +390,33 @@ func TestStartTableDoesNotAdvanceOverallProgress(t *testing.T) {
 	}
 	if info.IsCompleted {
 		t.Fatal("IsCompleted after StartTable = true, want false")
+	}
+}
+
+func TestMarkTableCreatedDoesNotLeaveTableActiveForImportProgress(t *testing.T) {
+	tracker, err := NewTracker()
+	if err != nil {
+		t.Fatalf("NewTracker() error = %v", err)
+	}
+	defer tracker.Close()
+
+	tracker.SetPlannedTotalTables(1)
+	if err := tracker.StartTable("created_only_table", "", false); err != nil {
+		t.Fatalf("StartTable() error = %v", err)
+	}
+	if err := tracker.MarkTableCreated("created_only_table"); err != nil {
+		t.Fatalf("MarkTableCreated() error = %v", err)
+	}
+
+	activeTables := tracker.state.GetActiveTables()
+	if _, ok := activeTables["created_only_table"]; ok {
+		t.Fatalf("created table should not be reported as active import progress: %#v", activeTables["created_only_table"])
+	}
+
+	info := tracker.GetProgress()
+	if info.CompletedCount != 0 || info.FailedCount != 0 || info.SkippedCount != 0 {
+		t.Fatalf("counts after MarkTableCreated = (%d,%d,%d), want (0,0,0)",
+			info.CompletedCount, info.FailedCount, info.SkippedCount)
 	}
 }
 

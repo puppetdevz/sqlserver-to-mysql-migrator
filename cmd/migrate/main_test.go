@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
 )
@@ -230,5 +233,34 @@ func TestBuildCSVTableMapDollarTableWithTimestampCaseInsensitive(t *testing.T) {
 
 	if got := tableMap[tableMatcher.Key("TABLE$")]; got != csvPath {
 		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
+	}
+}
+
+func TestImportDataWithCSVMappingReturnsContextErrorBeforeDispatch(t *testing.T) {
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVDirectory: t.TempDir(),
+		},
+		Migration: config.MigrationConfig{
+			MaxWorkers: 1,
+			BatchSize:  1,
+		},
+		Logging: config.LoggingConfig{
+			File: "",
+		},
+	}
+	tracker, err := progress.NewTracker()
+	if err != nil {
+		t.Fatalf("NewTracker() error = %v", err)
+	}
+	defer tracker.Close()
+
+	migrationCtx := migration.NewMigrationContext()
+	wantErr := errors.New("create table failed")
+	migrationCtx.Stop(wantErr)
+
+	err = importDataWithCSVMapping(cfg, nil, nil, []string{"ADDRESSBOOK"}, tracker, migrationCtx, matcher.NewTableNameMatcher(true))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("importDataWithCSVMapping() error = %v, want %v", err, wantErr)
 	}
 }

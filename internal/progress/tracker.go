@@ -88,6 +88,7 @@ func (t *Tracker) MarkTableCreated(tableName string) error {
 	t.state.TrackRunTable(tableName)
 
 	state.TableCreated = true
+	state.Status = StatusPending
 	state.EndTime = time.Now()
 	state.DurationMs = state.EndTime.Sub(state.StartTime).Milliseconds()
 
@@ -188,6 +189,13 @@ func (t *Tracker) GetProgress() ProgressInfo {
 		PhaseProgress:  t.state.GetPhaseProgress(),
 		IsCompleted:    t.state.IsCompleted(),
 	}
+}
+
+func (t *Tracker) GetActiveTables() map[string]*TableProgress {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	return t.state.GetActiveTables()
 }
 
 // StartPhase 开始新的阶段统计
@@ -291,7 +299,7 @@ func (t *Tracker) reportProgress() {
 		info.CompletedCount, info.FailedCount, info.SkippedCount)
 
 	// 打印每个活跃表的行级进度
-	activeTables := t.state.GetActiveTables()
+	activeTables := t.GetActiveTables()
 	if len(activeTables) > 0 {
 		logger.Info("Table import progress:")
 		for name, p := range activeTables {

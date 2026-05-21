@@ -11,6 +11,7 @@ import (
 
 // 包级别正则已移至 type_mapper.go（reNvarchar, reVarchar, reTrimNullable）
 // 阈值常量也在 type_mapper.go（VarcharThreshold=256, NvarcharThreshold=192）
+const mysqlMaxInlineRowBytes = 60000
 
 // TableConverter 表结构转换器
 type TableConverter struct {
@@ -86,6 +87,7 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 			forceTextColumns[col] = true
 		}
 	}
+	tc.applyRowSizeGuard(tableDDL, forceTextColumns)
 
 	// 列定义
 	for i, column := range tableDDL.Columns {
@@ -191,6 +193,94 @@ func (tc *TableConverter) extractType(typeDef string) string {
 	typeDef = strings.TrimSpace(typeDef)
 	typeDef = reTrimNullable.ReplaceAllString(typeDef, "")
 	return strings.TrimSpace(typeDef)
+}
+
+func (tc *TableConverter) applyRowSizeGuard(tableDDL *parser.TableDDL, forceTextColumns map[string]bool) {
+	indexedColumns := make(map[string]bool)
+	if tableDDL.PrimaryKey != nil {
+		for _, col := range tableDDL.PrimaryKey.Columns {
+			indexedColumns[col] = true
+		}
+	}
+	for _, index := range tableDDL.Indexes {
+		for _, col := range index.Columns {
+			indexedColumns[col] = true
+		}
+	}
+
+	type candidate struct {
+		name  string
+		bytes int
+	}
+
+	var estimatedBytes int
+	var candidates []candidate
+	for _, column := range tableDDL.Columns {
+		width, ok := tc.estimatedInlineBytes(column)
+		estimatedBytes += width
+		if ok && !forceTextColumns[column.Name] && !indexedColumns[column.Name] {
+			candidates = append(candidates, candidate{name: column.Name, bytes: width})
+		}
+	}
+
+	for _, candidate := range candidates {
+		if estimatedBytes <= mysqlMaxInlineRowBytes {
+			break
+		}
+		forceTextColumns[candidate.name] = true
+		estimatedBytes -= candidate.bytes
+	}
+}
+
+func (tc *TableConverter) estimatedInlineBytes(column parser.ColumnDef) (int, bool) {
+	cleanType := tc.typeMapper.CleanCollation(column.Type)
+	typePart := tc.extractType(cleanType)
+	sqlType := strings.TrimSpace(strings.ToLower(typePart))
+
+	if matches := reNvarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
+		n, _ := strconv.Atoi(matches[1])
+		return n * 4, true
+	}
+	if matches := reVarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
+		if matches[1] == "max" {
+			return 20, false
+		}
+		n, _ := strconv.Atoi(matches[1])
+		return n * 4, true
+	}
+	if matches := reNchar.FindStringSubmatch(sqlType); len(matches) > 0 {
+		n, _ := strconv.Atoi(matches[1])
+		return n * 4, true
+	}
+	if matches := reChar.FindStringSubmatch(sqlType); len(matches) > 0 {
+		n, _ := strconv.Atoi(matches[1])
+		return n * 4, true
+	}
+
+	switch {
+	case strings.HasPrefix(sqlType, "bigint"):
+		return 8, false
+	case strings.HasPrefix(sqlType, "int"):
+		return 4, false
+	case strings.HasPrefix(sqlType, "smallint"):
+		return 2, false
+	case strings.HasPrefix(sqlType, "tinyint"), strings.HasPrefix(sqlType, "bit"):
+		return 1, false
+	case strings.HasPrefix(sqlType, "datetime"):
+		return 8, false
+	case strings.HasPrefix(sqlType, "date"), strings.HasPrefix(sqlType, "time"):
+		return 3, false
+	case strings.HasPrefix(sqlType, "numeric"), strings.HasPrefix(sqlType, "decimal"), strings.HasPrefix(sqlType, "money"):
+		return 16, false
+	case strings.HasPrefix(sqlType, "float"):
+		return 8, false
+	case strings.HasPrefix(sqlType, "real"):
+		return 4, false
+	case strings.Contains(sqlType, "text"), strings.Contains(sqlType, "image"), strings.Contains(sqlType, "binary"):
+		return 20, false
+	default:
+		return 16, false
+	}
 }
 
 // convertIndex 转换索引定义

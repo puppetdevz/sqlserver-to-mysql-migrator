@@ -6,14 +6,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 const (
@@ -25,11 +28,18 @@ const (
 
 // TableImporter 表数据导入器
 type TableImporter struct {
-	conn          *database.Connection
-	cfg           *config.Config
-	tableName     string
-	csvPath       string
-	errorRecorder *ErrorRecorder
+	conn             *database.Connection
+	cfg              *config.Config
+	tableName        string
+	csvPath          string
+	errorRecorder    *ErrorRecorder
+	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
+}
+
+type dbColumnInfo struct {
+	Name     string
+	Type     string
+	Nullable bool
 }
 
 // NewTableImporter 创建表导入器
@@ -41,6 +51,12 @@ func NewTableImporter(conn *database.Connection, cfg *config.Config, tableName s
 		csvPath:       csvPath,
 		errorRecorder: errorRecorder,
 	}
+}
+
+// WithProgressCallback sets a per-batch progress callback for long-running imports.
+func (ti *TableImporter) WithProgressCallback(callback func(tableName string, totalRows, processedRows, insertedRows int64)) *TableImporter {
+	ti.progressCallback = callback
+	return ti
 }
 
 // Import 导入表数据（流水线优化：边读边写）
@@ -96,8 +112,10 @@ func countCSVRows(f *os.File) (int64, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
+	defer f.Seek(0, io.SeekStart)
 
 	reader := csv.NewReader(f)
+	reader.FieldsPerRecord = -1
 	var count int64
 	for {
 		_, err := reader.Read()
@@ -110,14 +128,19 @@ func countCSVRows(f *os.File) (int64, error) {
 		count++
 	}
 
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return count, err
-	}
 	return count, nil
 }
 
 // getDBColumns 获取数据库中表的列
 func (ti *TableImporter) getDBColumns(tableName string) ([]string, error) {
+	infos, err := ti.getDBColumnInfos(tableName)
+	if err != nil {
+		return nil, err
+	}
+	return columnNamesFromInfos(infos), nil
+}
+
+func (ti *TableImporter) getDBColumnInfos(tableName string) ([]dbColumnInfo, error) {
 	// 使用 DESCRIBE 获取列信息
 	query := fmt.Sprintf("DESCRIBE `%s`", tableName)
 	rows, err := ti.conn.DB.Query(query)
@@ -126,16 +149,28 @@ func (ti *TableImporter) getDBColumns(tableName string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var columns []string
+	var columns []dbColumnInfo
 	for rows.Next() {
 		var field, colType, null, key, extra string
 		var defaultVal *string
 		if err := rows.Scan(&field, &colType, &null, &key, &defaultVal, &extra); err != nil {
 			return nil, err
 		}
-		columns = append(columns, field)
+		columns = append(columns, dbColumnInfo{
+			Name:     field,
+			Type:     colType,
+			Nullable: strings.EqualFold(null, "YES"),
+		})
 	}
 	return columns, rows.Err()
+}
+
+func columnNamesFromInfos(infos []dbColumnInfo) []string {
+	columns := make([]string, len(infos))
+	for i, info := range infos {
+		columns[i] = info.Name
+	}
+	return columns
 }
 
 // BuildColumnIndexMap 构建列名到索引的映射（大写键）
@@ -173,13 +208,166 @@ func buildColumnMapping(csvHeaders []string, dbColumns []string) []int {
 	return mapping
 }
 
+func countMatchedColumns(csvHeaders []string, dbColumns []string) int {
+	dbColMap := BuildUpperColumnMap(dbColumns)
+	var matched int
+	for _, csvCol := range csvHeaders {
+		if _, ok := dbColMap[strings.ToUpper(csvCol)]; ok {
+			matched++
+		}
+	}
+	return matched
+}
+
+func alignColumnInfos(headers []string, dbColumnInfos []dbColumnInfo) []dbColumnInfo {
+	dbInfoMap := make(map[string]dbColumnInfo, len(dbColumnInfos))
+	for _, info := range dbColumnInfos {
+		dbInfoMap[strings.ToUpper(info.Name)] = info
+	}
+
+	aligned := make([]dbColumnInfo, len(headers))
+	for i, header := range headers {
+		if info, ok := dbInfoMap[strings.ToUpper(header)]; ok {
+			aligned[i] = info
+		} else {
+			aligned[i] = dbColumnInfo{Name: header}
+		}
+	}
+	return aligned
+}
+
+func repairDelimitedRow(row []string, columnInfos []dbColumnInfo) []string {
+	extraFields := len(row) - len(columnInfos)
+	if extraFields <= 0 || len(columnInfos) == 0 {
+		return row
+	}
+
+	bestIdx := -1
+	bestScore := -1 << 30
+	for i, info := range columnInfos {
+		if !canAbsorbDelimitedFields(info.Type) || i+extraFields >= len(row) {
+			continue
+		}
+		candidate := collapseDelimitedFields(row, i, extraFields)
+		score := scoreRowAgainstColumnTypes(candidate, columnInfos)
+		if score > bestScore {
+			bestIdx = i
+			bestScore = score
+		}
+	}
+	if bestIdx < 0 || bestScore < 0 {
+		return row
+	}
+	return collapseDelimitedFields(row, bestIdx, extraFields)
+}
+
+func collapseDelimitedFields(row []string, absorbIdx, extraFields int) []string {
+	repaired := make([]string, 0, len(row)-extraFields)
+	repaired = append(repaired, row[:absorbIdx]...)
+	repaired = append(repaired, strings.Join(row[absorbIdx:absorbIdx+extraFields+1], ","))
+	repaired = append(repaired, row[absorbIdx+extraFields+1:]...)
+	return repaired
+}
+
+func scoreRowAgainstColumnTypes(row []string, columnInfos []dbColumnInfo) int {
+	score := 0
+	for i, value := range row {
+		if i >= len(columnInfos) {
+			break
+		}
+		score += scoreValueForColumnType(value, columnInfos[i])
+	}
+	return score
+}
+
+func scoreValueForColumnType(value string, info dbColumnInfo) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 1
+	}
+
+	columnType := strings.ToLower(info.Type)
+	switch {
+	case canAbsorbDelimitedFields(columnType):
+		return 1
+	case isIntegerColumnType(columnType):
+		if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return 3
+		}
+		return -5
+	case isDecimalColumnType(columnType):
+		if _, err := strconv.ParseFloat(value, 64); err == nil {
+			return 3
+		}
+		return -5
+	case isTemporalColumnType(columnType):
+		if isTemporalValue(value) {
+			return 3
+		}
+		return -5
+	default:
+		return 0
+	}
+}
+
+func canAbsorbDelimitedFields(columnType string) bool {
+	columnType = strings.ToLower(columnType)
+	return strings.Contains(columnType, "char") ||
+		strings.Contains(columnType, "text") ||
+		strings.Contains(columnType, "blob") ||
+		strings.Contains(columnType, "json")
+}
+
+func isIntegerColumnType(columnType string) bool {
+	columnType = strings.ToLower(columnType)
+	return strings.Contains(columnType, "int") || strings.Contains(columnType, "bit")
+}
+
+func isDecimalColumnType(columnType string) bool {
+	columnType = strings.ToLower(columnType)
+	return strings.Contains(columnType, "decimal") ||
+		strings.Contains(columnType, "numeric") ||
+		strings.Contains(columnType, "float") ||
+		strings.Contains(columnType, "double") ||
+		strings.Contains(columnType, "real")
+}
+
+func isTemporalColumnType(columnType string) bool {
+	columnType = strings.ToLower(columnType)
+	return strings.Contains(columnType, "date") ||
+		strings.Contains(columnType, "time") ||
+		strings.Contains(columnType, "year")
+}
+
+func isTemporalValue(value string) bool {
+	layouts := []string{
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05.999",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+		"15:04:05",
+		time.RFC3339,
+	}
+	for _, layout := range layouts {
+		if _, err := time.Parse(layout, value); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // filterRowData 过滤行数据，只保留有效的列（根据 mapping 映射）
 // 支持 []string 和 []interface{} 两种输入类型
 func filterRowData(row []any, mapping []int) []interface{} {
 	result := make([]interface{}, 0, len(mapping))
-	for i, val := range row {
-		if mapping[i] >= 0 {
-			result = append(result, val)
+	for i, mappedIdx := range mapping {
+		if mappedIdx < 0 {
+			continue
+		}
+		if i < len(row) {
+			result = append(result, row[i])
+		} else {
+			result = append(result, nil)
 		}
 	}
 	return result
@@ -187,10 +375,10 @@ func filterRowData(row []any, mapping []int) []interface{} {
 
 // batchResult 批次处理结果（从 DB writer → 主 goroutine）
 type batchResult struct {
-    batchNum     int
-    rowCount     int
-    affectedRows int64
-    err          error // nil=成功，非nil=错误
+	batchNum     int
+	rowCount     int
+	affectedRows int64
+	err          error // nil=成功，非nil=错误
 }
 
 // pipelinedImport 流水线导入：边读边写
@@ -198,18 +386,24 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	reader := csv.NewReader(file)
 	reader.LazyQuotes = true
 	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1
 
 	// 获取数据库列（提前获取，用于无表头模式校验）
-	dbColumns, dbErr := ti.getDBColumns(actualTableName)
+	dbColumnInfos, dbErr := ti.getDBColumnInfos(actualTableName)
+	var dbColumns []string
 	if dbErr != nil {
 		logger.Warnf("Failed to get DB columns for %s: %v", actualTableName, dbErr)
+	} else {
+		dbColumns = columnNamesFromInfos(dbColumnInfos)
 	}
 
 	// 根据配置决定是否读取表头
 	var headers []string
 	var firstRow []string // 无表头模式的第一行数据
+	hasConfiguredHeader := ti.cfg.Source.CSVHasHeader != nil && *ti.cfg.Source.CSVHasHeader
+	useHeaderMapping := hasConfiguredHeader
 
-	if ti.cfg.Source.CSVHasHeader != nil && *ti.cfg.Source.CSVHasHeader {
+	if hasConfiguredHeader {
 		// 有表头模式：读取第一行作为表头
 		var err error
 		headers, err = reader.Read()
@@ -227,6 +421,40 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		for i := range headers {
 			headers[i] = strings.TrimSpace(headers[i])
 			headers[i] = strings.TrimPrefix(headers[i], bom)
+		}
+
+		if dbColumns != nil {
+			matchedColumns := countMatchedColumns(headers, dbColumns)
+			switch {
+			case matchedColumns == 0 && len(headers) == len(dbColumns):
+				logger.Warnf("Table %s: configured CSV header but first row does not match DB columns; importing as no-header CSV", ti.tableName)
+				firstRow = headers
+				headers = dbColumns
+				useHeaderMapping = false
+			case len(headers) != len(dbColumns):
+				peekRow, err := reader.Read()
+				if err == io.EOF {
+					// Header-only file. Continue with header mapping and no data rows.
+					break
+				}
+				if err != nil {
+					file.Close()
+					diag := &ImportDiagnostic{
+						TableName:   ti.tableName,
+						ErrorType:   ErrorTypeEOF,
+						ErrorDetail: fmt.Sprintf("failed to read first CSV data row (%v)", err),
+						CSVPath:     ti.csvPath,
+					}
+					return nil, fmt.Errorf("failed to read first CSV data row: %w", err), diag
+				}
+				firstRow = peekRow
+				if len(peekRow) == len(dbColumns) {
+					logger.Warnf("Table %s: CSV header has %d columns but data rows and DB have %d columns; falling back to DB column order",
+						ti.tableName, len(headers), len(dbColumns))
+					headers = dbColumns
+					useHeaderMapping = false
+				}
+			}
 		}
 	} else {
 		// 无表头模式：读取第一行数据，验证列数
@@ -267,6 +495,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	if dbColumns == nil {
 		dbColumns = headers
 	}
+	rowColumnInfos := alignColumnInfos(headers, dbColumnInfos)
 
 	// 创建批量插入器（使用数据库列过滤 CSV 列）
 	inserter, skippedCols := NewBatchInserterWithDBColumns(
@@ -298,7 +527,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 
 	// 构建 CSV 列索引到有效列的映射（用于筛选数据）
 	var mapping []int
-	if ti.cfg.Source.CSVHasHeader != nil && *ti.cfg.Source.CSVHasHeader {
+	if useHeaderMapping {
 		// 有表头模式：按列名匹配
 		mapping = buildColumnMapping(headers, dbColumns)
 	} else {
@@ -334,9 +563,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	var wg sync.WaitGroup
 
 	// 启动结果聚合 goroutine
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		defer close(aggregatorDone)
 
 		for result := range resultChan {
@@ -349,6 +576,9 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			} else {
 				processedRows += int64(result.rowCount)
 				totalRows += result.affectedRows
+			}
+			if ti.progressCallback != nil {
+				ti.progressCallback(ti.tableName, csvTotalRows, processedRows, totalRows)
 			}
 
 			if processedRows%50000 == 0 && processedRows > 0 {
@@ -404,7 +634,8 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			processedBatch := make([][]interface{}, len(batch))
 			for i, row := range batch {
 				// 先类型转换，再过滤
-				processedRow := PreprocessRow(row)
+				repairedRow := repairDelimitedRow(row, rowColumnInfos)
+				processedRow := PreprocessRow(repairedRow)
 				filteredRow := filterRowData(processedRow, mapping)
 				processedBatch[i] = filteredRow
 			}
@@ -467,11 +698,11 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 
 	wg.Wait()
 
-	// 等待 aggregator goroutine 完成
-	<-aggregatorDone
-
 	// 关闭 resultChan 表示不再有结果
 	close(resultChan)
+
+	// 等待 aggregator goroutine 完成
+	<-aggregatorDone
 
 	if fastFail && lastErr != nil {
 		return &ImportResult{
@@ -503,7 +734,7 @@ type ImportResult struct {
 	TableName     string
 	ProcessedRows int64
 	InsertedRows  int64
-	TotalRows     int64  // CSV 文件总行数
+	TotalRows     int64 // CSV 文件总行数
 	ErrorCount    int64
 	Success       bool
 	ErrorMessage  string
@@ -667,9 +898,10 @@ func (er *ErrorRecorder) Close() error {
 
 // DataImporter 数据导入协调器
 type DataImporter struct {
-	conn          *database.Connection
-	cfg           *config.Config
-	errorRecorder *ErrorRecorder
+	conn             *database.Connection
+	cfg              *config.Config
+	errorRecorder    *ErrorRecorder
+	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
 }
 
 // NewDataImporter 创建数据导入协调器
@@ -686,6 +918,12 @@ func NewDataImporter(conn *database.Connection, cfg *config.Config) *DataImporte
 	}
 }
 
+// WithProgressCallback sets a per-batch progress callback for table imports.
+func (di *DataImporter) WithProgressCallback(callback func(tableName string, totalRows, processedRows, insertedRows int64)) *DataImporter {
+	di.progressCallback = callback
+	return di
+}
+
 // ImportTable 导入单个表
 func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *ImportDiagnostic) {
 	// 查找 CSV 文件
@@ -696,6 +934,9 @@ func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *Im
 
 	// 创建表导入器
 	importer := NewTableImporter(di.conn, di.cfg, tableName, csvPath, di.errorRecorder)
+	if di.progressCallback != nil {
+		importer.WithProgressCallback(di.progressCallback)
+	}
 
 	// 执行导入
 	return importer.Import()
@@ -821,6 +1062,7 @@ func (di *DataImporter) ImportTables(tableNames []string) ([]*ImportResult, erro
 func PreprocessRow(row []string) []interface{} {
 	processed := make([]interface{}, len(row))
 	for i, value := range row {
+		value = normalizeCSVString(value)
 		// 空字符串转换为 NULL
 		if strings.TrimSpace(value) == "" {
 			processed[i] = nil
@@ -829,6 +1071,17 @@ func PreprocessRow(row []string) []interface{} {
 		}
 	}
 	return processed
+}
+
+func normalizeCSVString(value string) string {
+	if utf8.ValidString(value) {
+		return value
+	}
+	decoded, err := simplifiedchinese.GB18030.NewDecoder().String(value)
+	if err == nil && utf8.ValidString(decoded) {
+		return decoded
+	}
+	return strings.ToValidUTF8(value, "\uFFFD")
 }
 
 // PipelinedImporter 流水线优化的大规模导入器

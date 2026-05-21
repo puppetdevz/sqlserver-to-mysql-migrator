@@ -5,10 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
-	_ "github.com/go-sql-driver/mysql"
 )
 
 func TestNoHeaderCSVImport(t *testing.T) {
@@ -31,8 +32,8 @@ func TestNoHeaderCSVImport(t *testing.T) {
 			CSVHasHeader: func(b bool) *bool { return &b }(false),
 		},
 		Migration: config.MigrationConfig{
-			BatchSize:       100,
-			OnDuplicate:     "replace",
+			BatchSize:   100,
+			OnDuplicate: "replace",
 		},
 	}
 
@@ -63,6 +64,13 @@ func TestNoHeaderCSVImport(t *testing.T) {
 	recorder, _ := NewErrorRecorder("")
 	defer recorder.Close()
 
+	var progressCalls []struct {
+		tableName     string
+		totalRows     int64
+		processedRows int64
+		insertedRows  int64
+	}
+
 	// Enable debug logging for testing
 	// Note: logger should be configured externally
 
@@ -73,6 +81,14 @@ func TestNoHeaderCSVImport(t *testing.T) {
 		tableName:     "test_no_header_t",
 		csvPath:       csvPath,
 		errorRecorder: recorder,
+		progressCallback: func(tableName string, totalRows, processedRows, insertedRows int64) {
+			progressCalls = append(progressCalls, struct {
+				tableName     string
+				totalRows     int64
+				processedRows int64
+				insertedRows  int64
+			}{tableName, totalRows, processedRows, insertedRows})
+		},
 	}
 
 	file, err := os.Open(csvPath)
@@ -96,11 +112,548 @@ func TestNoHeaderCSVImport(t *testing.T) {
 		t.Errorf("Expected 3 inserted rows, got %d", result.InsertedRows)
 	}
 
+	if len(progressCalls) == 0 {
+		t.Fatal("expected progress callback to be called")
+	}
+	lastProgress := progressCalls[len(progressCalls)-1]
+	if lastProgress.tableName != "test_no_header_t" ||
+		lastProgress.totalRows != 3 ||
+		lastProgress.processedRows != 3 ||
+		lastProgress.insertedRows != 3 {
+		t.Fatalf("last progress callback = %+v, want table test_no_header_t with 3/3 rows", lastProgress)
+	}
+
 	// Verify data
 	var count int
 	conn.DB.QueryRow("SELECT COUNT(*) FROM test_no_header_t").Scan(&count)
 	if count != 3 {
 		t.Errorf("Expected 3 rows in DB, got %d", count)
+	}
+}
+
+func TestHeaderCSVImportWidensVarcharColumnWhenSourceDataExceedsDDL(t *testing.T) {
+	tmpDir := os.TempDir()
+	csvPath := filepath.Join(tmpDir, "test_auto_widen.csv")
+
+	csvContent := `id,note
+1,this value is longer than five chars`
+	if err := os.WriteFile(csvPath, []byte(csvContent), 0644); err != nil {
+		t.Fatalf("Failed to create test CSV: %v", err)
+	}
+	defer os.Remove(csvPath)
+
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVHasHeader: func(b bool) *bool { return &b }(true),
+		},
+		Migration: config.MigrationConfig{
+			BatchSize:   100,
+			OnDuplicate: "replace",
+		},
+	}
+
+	conn, err := database.NewConnection(&config.TargetConfig{
+		Host:     "localhost",
+		Port:     3306,
+		Database: "migration_example",
+		User:     "root",
+		Password: "REDACTED_PRIVATE_CREDENTIAL",
+		Charset:  "utf8mb4",
+	})
+	if err != nil {
+		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_widen_t (id INT PRIMARY KEY, note VARCHAR(5) NULL)")
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+	defer conn.DB.Exec("DROP TABLE IF EXISTS test_auto_widen_t")
+	if _, err := conn.DB.Exec("TRUNCATE TABLE test_auto_widen_t"); err != nil {
+		t.Fatalf("Failed to truncate test table: %v", err)
+	}
+
+	recorder, _ := NewErrorRecorder("")
+	defer recorder.Close()
+
+	ti := &TableImporter{
+		conn:          conn,
+		cfg:           cfg,
+		tableName:     "test_auto_widen_t",
+		csvPath:       csvPath,
+		errorRecorder: recorder,
+	}
+
+	file, err := os.Open(csvPath)
+	if err != nil {
+		t.Fatalf("Failed to open CSV: %v", err)
+	}
+	defer file.Close()
+
+	result, err, diag := ti.pipelinedImport(file, "test_auto_widen_t", 1)
+	if err != nil {
+		if diag != nil {
+			t.Errorf("Import failed with diagnostic: %+v", diag)
+		}
+		t.Fatalf("Import failed: %v", err)
+	}
+	if result.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", result.InsertedRows)
+	}
+
+	var note string
+	if err := conn.DB.QueryRow("SELECT note FROM test_auto_widen_t WHERE id = 1").Scan(&note); err != nil {
+		t.Fatalf("failed to query imported row: %v", err)
+	}
+	if note != "this value is longer than five chars" {
+		t.Fatalf("note = %q, want full source value", note)
+	}
+
+	var columnType string
+	if err := conn.DB.QueryRow("SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'test_auto_widen_t' AND COLUMN_NAME = 'note'").Scan(&columnType); err != nil {
+		t.Fatalf("failed to query widened column: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(columnType), "text") {
+		t.Fatalf("column type = %q, want text after auto widen", columnType)
+	}
+}
+
+func TestHeaderCSVImportRepairsUnquotedDelimiterInTextColumn(t *testing.T) {
+	tmpDir := os.TempDir()
+	csvPath := filepath.Join(tmpDir, "test_unquoted_text_delimiter.csv")
+
+	csvContent := `id,subject,module,auth,created_at,updated_at,org_account_id
+1,report,2,Member|1,Member|2,Department|3,2020-09-18 18:52:07.170,2022-02-23 12:37:22.947,42`
+	if err := os.WriteFile(csvPath, []byte(csvContent), 0644); err != nil {
+		t.Fatalf("Failed to create test CSV: %v", err)
+	}
+	defer os.Remove(csvPath)
+
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVHasHeader: func(b bool) *bool { return &b }(true),
+		},
+		Migration: config.MigrationConfig{
+			BatchSize:   100,
+			OnDuplicate: "replace",
+		},
+	}
+
+	conn, err := database.NewConnection(&config.TargetConfig{
+		Host:     "localhost",
+		Port:     3306,
+		Database: "migration_example",
+		User:     "root",
+		Password: "REDACTED_PRIVATE_CREDENTIAL",
+		Charset:  "utf8mb4",
+	})
+	if err != nil {
+		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.DB.Exec(`
+		CREATE TABLE IF NOT EXISTS test_unquoted_text_delimiter_t (
+			id BIGINT PRIMARY KEY,
+			subject TEXT NULL,
+			module SMALLINT NULL,
+			auth LONGTEXT NULL,
+			created_at DATETIME NULL,
+			updated_at DATETIME NULL,
+			org_account_id BIGINT NULL
+		)`)
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+	defer conn.DB.Exec("DROP TABLE IF EXISTS test_unquoted_text_delimiter_t")
+	if _, err := conn.DB.Exec("TRUNCATE TABLE test_unquoted_text_delimiter_t"); err != nil {
+		t.Fatalf("Failed to truncate test table: %v", err)
+	}
+
+	recorder, _ := NewErrorRecorder("")
+	defer recorder.Close()
+
+	ti := &TableImporter{
+		conn:          conn,
+		cfg:           cfg,
+		tableName:     "test_unquoted_text_delimiter_t",
+		csvPath:       csvPath,
+		errorRecorder: recorder,
+	}
+
+	file, err := os.Open(csvPath)
+	if err != nil {
+		t.Fatalf("Failed to open CSV: %v", err)
+	}
+	defer file.Close()
+
+	result, err, diag := ti.pipelinedImport(file, "test_unquoted_text_delimiter_t", 1)
+	if err != nil {
+		if diag != nil {
+			t.Errorf("Import failed with diagnostic: %+v", diag)
+		}
+		t.Fatalf("Import failed: %v", err)
+	}
+	if result.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", result.InsertedRows)
+	}
+
+	var auth string
+	var orgAccountID int64
+	if err := conn.DB.QueryRow("SELECT auth, org_account_id FROM test_unquoted_text_delimiter_t WHERE id = 1").Scan(&auth, &orgAccountID); err != nil {
+		t.Fatalf("failed to query imported row: %v", err)
+	}
+	if auth != "Member|1,Member|2,Department|3" {
+		t.Fatalf("auth = %q, want repaired comma-joined value", auth)
+	}
+	if orgAccountID != 42 {
+		t.Fatalf("org_account_id = %d, want 42", orgAccountID)
+	}
+}
+
+func TestHeaderCSVImportConvertsInvalidDatetimeColumnToText(t *testing.T) {
+	tmpDir := os.TempDir()
+	csvPath := filepath.Join(tmpDir, "test_auto_datetime_text.csv")
+
+	csvContent := `id,occurred_at
+1,9999999999999999999`
+	if err := os.WriteFile(csvPath, []byte(csvContent), 0644); err != nil {
+		t.Fatalf("Failed to create test CSV: %v", err)
+	}
+	defer os.Remove(csvPath)
+
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVHasHeader: func(b bool) *bool { return &b }(true),
+		},
+		Migration: config.MigrationConfig{
+			BatchSize:   100,
+			OnDuplicate: "replace",
+		},
+	}
+
+	conn, err := database.NewConnection(&config.TargetConfig{
+		Host:     "localhost",
+		Port:     3306,
+		Database: "migration_example",
+		User:     "root",
+		Password: "REDACTED_PRIVATE_CREDENTIAL",
+		Charset:  "utf8mb4",
+	})
+	if err != nil {
+		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_datetime_t (id INT PRIMARY KEY, occurred_at DATETIME NULL)")
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+	defer conn.DB.Exec("DROP TABLE IF EXISTS test_auto_datetime_t")
+	if _, err := conn.DB.Exec("TRUNCATE TABLE test_auto_datetime_t"); err != nil {
+		t.Fatalf("Failed to truncate test table: %v", err)
+	}
+
+	recorder, _ := NewErrorRecorder("")
+	defer recorder.Close()
+
+	ti := &TableImporter{
+		conn:          conn,
+		cfg:           cfg,
+		tableName:     "test_auto_datetime_t",
+		csvPath:       csvPath,
+		errorRecorder: recorder,
+	}
+
+	file, err := os.Open(csvPath)
+	if err != nil {
+		t.Fatalf("Failed to open CSV: %v", err)
+	}
+	defer file.Close()
+
+	result, err, diag := ti.pipelinedImport(file, "test_auto_datetime_t", 1)
+	if err != nil {
+		if diag != nil {
+			t.Errorf("Import failed with diagnostic: %+v", diag)
+		}
+		t.Fatalf("Import failed: %v", err)
+	}
+	if result.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", result.InsertedRows)
+	}
+
+	var occurredAt string
+	if err := conn.DB.QueryRow("SELECT occurred_at FROM test_auto_datetime_t WHERE id = 1").Scan(&occurredAt); err != nil {
+		t.Fatalf("failed to query imported row: %v", err)
+	}
+	if occurredAt != "9999999999999999999" {
+		t.Fatalf("occurred_at = %q, want full source value", occurredAt)
+	}
+
+	var columnType string
+	if err := conn.DB.QueryRow("SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'test_auto_datetime_t' AND COLUMN_NAME = 'occurred_at'").Scan(&columnType); err != nil {
+		t.Fatalf("failed to query converted column: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(columnType), "text") {
+		t.Fatalf("column type = %q, want text after datetime conversion", columnType)
+	}
+}
+
+func TestHeaderCSVImportConvertsInvalidDecimalColumnToText(t *testing.T) {
+	tmpDir := os.TempDir()
+	csvPath := filepath.Join(tmpDir, "test_auto_decimal_text.csv")
+
+	csvContent := `id,category_code
+1,YJLB03`
+	if err := os.WriteFile(csvPath, []byte(csvContent), 0644); err != nil {
+		t.Fatalf("Failed to create test CSV: %v", err)
+	}
+	defer os.Remove(csvPath)
+
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVHasHeader: func(b bool) *bool { return &b }(true),
+		},
+		Migration: config.MigrationConfig{
+			BatchSize:   100,
+			OnDuplicate: "replace",
+		},
+	}
+
+	conn, err := database.NewConnection(&config.TargetConfig{
+		Host:     "localhost",
+		Port:     3306,
+		Database: "migration_example",
+		User:     "root",
+		Password: "REDACTED_PRIVATE_CREDENTIAL",
+		Charset:  "utf8mb4",
+	})
+	if err != nil {
+		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_decimal_t (id INT PRIMARY KEY, category_code DECIMAL(10,0) NULL)")
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+	defer conn.DB.Exec("DROP TABLE IF EXISTS test_auto_decimal_t")
+	if _, err := conn.DB.Exec("TRUNCATE TABLE test_auto_decimal_t"); err != nil {
+		t.Fatalf("Failed to truncate test table: %v", err)
+	}
+
+	recorder, _ := NewErrorRecorder("")
+	defer recorder.Close()
+
+	ti := &TableImporter{
+		conn:          conn,
+		cfg:           cfg,
+		tableName:     "test_auto_decimal_t",
+		csvPath:       csvPath,
+		errorRecorder: recorder,
+	}
+
+	file, err := os.Open(csvPath)
+	if err != nil {
+		t.Fatalf("Failed to open CSV: %v", err)
+	}
+	defer file.Close()
+
+	result, err, diag := ti.pipelinedImport(file, "test_auto_decimal_t", 1)
+	if err != nil {
+		if diag != nil {
+			t.Errorf("Import failed with diagnostic: %+v", diag)
+		}
+		t.Fatalf("Import failed: %v", err)
+	}
+	if result.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", result.InsertedRows)
+	}
+
+	var categoryCode string
+	if err := conn.DB.QueryRow("SELECT category_code FROM test_auto_decimal_t WHERE id = 1").Scan(&categoryCode); err != nil {
+		t.Fatalf("failed to query imported row: %v", err)
+	}
+	if categoryCode != "YJLB03" {
+		t.Fatalf("category_code = %q, want full source value", categoryCode)
+	}
+
+	var columnType string
+	if err := conn.DB.QueryRow("SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'test_auto_decimal_t' AND COLUMN_NAME = 'category_code'").Scan(&columnType); err != nil {
+		t.Fatalf("failed to query converted column: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(columnType), "text") {
+		t.Fatalf("column type = %q, want text after decimal conversion", columnType)
+	}
+}
+
+func TestHeaderCSVImportConvertsOutOfRangeNumericColumnToText(t *testing.T) {
+	tmpDir := os.TempDir()
+	csvPath := filepath.Join(tmpDir, "test_auto_numeric_range_text.csv")
+
+	csvContent := `id,amount
+1,123456789012345678901234.56`
+	if err := os.WriteFile(csvPath, []byte(csvContent), 0644); err != nil {
+		t.Fatalf("Failed to create test CSV: %v", err)
+	}
+	defer os.Remove(csvPath)
+
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVHasHeader: func(b bool) *bool { return &b }(true),
+		},
+		Migration: config.MigrationConfig{
+			BatchSize:   100,
+			OnDuplicate: "replace",
+		},
+	}
+
+	conn, err := database.NewConnection(&config.TargetConfig{
+		Host:     "localhost",
+		Port:     3306,
+		Database: "migration_example",
+		User:     "root",
+		Password: "REDACTED_PRIVATE_CREDENTIAL",
+		Charset:  "utf8mb4",
+	})
+	if err != nil {
+		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_numeric_range_t (id INT PRIMARY KEY, amount DECIMAL(5,2) NULL)")
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+	defer conn.DB.Exec("DROP TABLE IF EXISTS test_auto_numeric_range_t")
+	if _, err := conn.DB.Exec("TRUNCATE TABLE test_auto_numeric_range_t"); err != nil {
+		t.Fatalf("Failed to truncate test table: %v", err)
+	}
+
+	recorder, _ := NewErrorRecorder("")
+	defer recorder.Close()
+
+	ti := &TableImporter{
+		conn:          conn,
+		cfg:           cfg,
+		tableName:     "test_auto_numeric_range_t",
+		csvPath:       csvPath,
+		errorRecorder: recorder,
+	}
+
+	file, err := os.Open(csvPath)
+	if err != nil {
+		t.Fatalf("Failed to open CSV: %v", err)
+	}
+	defer file.Close()
+
+	result, err, diag := ti.pipelinedImport(file, "test_auto_numeric_range_t", 1)
+	if err != nil {
+		if diag != nil {
+			t.Errorf("Import failed with diagnostic: %+v", diag)
+		}
+		t.Fatalf("Import failed: %v", err)
+	}
+	if result.InsertedRows != 1 {
+		t.Fatalf("InsertedRows = %d, want 1", result.InsertedRows)
+	}
+
+	var amount string
+	if err := conn.DB.QueryRow("SELECT amount FROM test_auto_numeric_range_t WHERE id = 1").Scan(&amount); err != nil {
+		t.Fatalf("failed to query imported row: %v", err)
+	}
+	if amount != "123456789012345678901234.56" {
+		t.Fatalf("amount = %q, want full source value", amount)
+	}
+}
+
+func TestPreprocessRowDecodesGB18030TextToUTF8(t *testing.T) {
+	processed := PreprocessRow([]string{"\xB9\xDC\xC0\xED_\xCE\xB4\xCD\xA8\xB9\xFD"})
+	got, ok := processed[0].(string)
+	if !ok {
+		t.Fatalf("processed value type = %T, want string", processed[0])
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("processed value is not valid UTF-8: %q", got)
+	}
+	if got != "管理_未通过" {
+		t.Fatalf("processed value = %q, want 管理_未通过", got)
+	}
+}
+
+func TestHeaderCSVImportFallsBackToDBColumnOrderWhenHeaderIsIncomplete(t *testing.T) {
+	tmpDir := os.TempDir()
+	csvPath := filepath.Join(tmpDir, "test_incomplete_header.csv")
+
+	csvContent := `id,name
+1,Alice,12.50,retail
+2,Bob,8.75,finance`
+	if err := os.WriteFile(csvPath, []byte(csvContent), 0644); err != nil {
+		t.Fatalf("Failed to create test CSV: %v", err)
+	}
+	defer os.Remove(csvPath)
+
+	cfg := &config.Config{
+		Source: config.SourceConfig{
+			CSVHasHeader: func(b bool) *bool { return &b }(true),
+		},
+		Migration: config.MigrationConfig{
+			BatchSize:   100,
+			OnDuplicate: "replace",
+		},
+	}
+
+	conn, err := database.NewConnection(&config.TargetConfig{
+		Host:     "localhost",
+		Port:     3306,
+		Database: "migration_example",
+		User:     "root",
+		Password: "REDACTED_PRIVATE_CREDENTIAL",
+		Charset:  "utf8mb4",
+	})
+	if err != nil {
+		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_incomplete_header_t (id INT PRIMARY KEY, name VARCHAR(20), amount DECIMAL(10,2), category VARCHAR(20))")
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+	defer conn.DB.Exec("DROP TABLE IF EXISTS test_incomplete_header_t")
+	if _, err := conn.DB.Exec("TRUNCATE TABLE test_incomplete_header_t"); err != nil {
+		t.Fatalf("Failed to truncate test table: %v", err)
+	}
+
+	recorder, _ := NewErrorRecorder("")
+	defer recorder.Close()
+
+	ti := &TableImporter{
+		conn:          conn,
+		cfg:           cfg,
+		tableName:     "test_incomplete_header_t",
+		csvPath:       csvPath,
+		errorRecorder: recorder,
+	}
+
+	result, err, diag := ti.Import()
+	if err != nil {
+		if diag != nil {
+			t.Errorf("Import failed with diagnostic: %+v", diag)
+		}
+		t.Fatalf("Import failed: %v", err)
+	}
+	if result.InsertedRows != 2 {
+		t.Fatalf("InsertedRows = %d, want 2", result.InsertedRows)
+	}
+
+	var amount, category string
+	if err := conn.DB.QueryRow("SELECT amount, category FROM test_incomplete_header_t WHERE id = 1").Scan(&amount, &category); err != nil {
+		t.Fatalf("failed to query imported row: %v", err)
+	}
+	if amount != "12.50" || category != "retail" {
+		t.Fatalf("row values = amount %q category %q, want 12.50 retail", amount, category)
 	}
 }
 

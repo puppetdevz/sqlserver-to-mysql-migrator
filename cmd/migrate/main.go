@@ -469,6 +469,10 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 
 // importDataWithCSVMapping 导入数据（基于 CSV 文件映射）
 func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csvFiles []string, allowedTables []string, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) error {
+	if err := migrationCtx.Err(); err != nil {
+		return err
+	}
+
 	// 从 CSV 文件名提取表名 -> CSV 文件路径 的映射
 	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
 
@@ -504,6 +508,14 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 
 	// 创建数据导入器
 	dataImporter := importer.NewDataImporter(conn, cfg)
+	dataImporter.WithProgressCallback(func(tableName string, totalRows, processedRows, insertedRows int64) {
+		if totalRows > 0 {
+			if err := tracker.SetTableTotalRows(tableName, totalRows); err != nil {
+				logger.Warnf("Failed to set total rows for %s: %v", tableName, err)
+			}
+		}
+		tracker.UpdateTableProgress(tableName, processedRows, insertedRows)
+	})
 	defer dataImporter.Close()
 
 	// 使用 worker pool 并发导入

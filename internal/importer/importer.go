@@ -311,32 +311,19 @@ func scoreValueForColumnType(value string, info dbColumnInfo) int {
 }
 
 func canAbsorbDelimitedFields(columnType string) bool {
-	columnType = strings.ToLower(columnType)
-	return strings.Contains(columnType, "char") ||
-		strings.Contains(columnType, "text") ||
-		strings.Contains(columnType, "blob") ||
-		strings.Contains(columnType, "json")
+	return strings.ContainsAny(columnType, "chartextblobjson")
 }
 
 func isIntegerColumnType(columnType string) bool {
-	columnType = strings.ToLower(columnType)
-	return strings.Contains(columnType, "int") || strings.Contains(columnType, "bit")
+	return strings.ContainsAny(columnType, "intbit")
 }
 
 func isDecimalColumnType(columnType string) bool {
-	columnType = strings.ToLower(columnType)
-	return strings.Contains(columnType, "decimal") ||
-		strings.Contains(columnType, "numeric") ||
-		strings.Contains(columnType, "float") ||
-		strings.Contains(columnType, "double") ||
-		strings.Contains(columnType, "real")
+	return strings.ContainsAny(columnType, "decimalnumericfloatdoublereal")
 }
 
 func isTemporalColumnType(columnType string) bool {
-	columnType = strings.ToLower(columnType)
-	return strings.Contains(columnType, "date") ||
-		strings.Contains(columnType, "time") ||
-		strings.Contains(columnType, "year")
+	return strings.ContainsAny(columnType, "datetimeyear")
 }
 
 func isTemporalValue(value string) bool {

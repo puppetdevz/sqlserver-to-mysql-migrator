@@ -2,6 +2,7 @@ package converter
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -222,6 +223,10 @@ func (tc *TableConverter) applyRowSizeGuard(tableDDL *parser.TableDDL, forceText
 			candidates = append(candidates, candidate{name: column.Name, bytes: width})
 		}
 	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].bytes > candidates[j].bytes
+	})
 
 	for _, candidate := range candidates {
 		if estimatedBytes <= mysqlMaxInlineRowBytes {

@@ -16,6 +16,29 @@ var reIncorrectTemporalColumn = regexp.MustCompile(`Incorrect (?:date|datetime|t
 var reIncorrectNumericColumn = regexp.MustCompile(`Incorrect (?:integer|decimal|double|float) value: .* for column '([^']+)'`)
 var reOutOfRangeColumn = regexp.MustCompile(`Out of range value for column '([^']+)'`)
 
+// errorColumnExtractor 提取错误消息中的列名
+type errorColumnExtractor struct {
+	pattern *regexp.Regexp
+}
+
+func (e *errorColumnExtractor) extract(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	matches := e.pattern.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+var (
+	_dataTooLongExtractor    = &errorColumnExtractor{pattern: reDataTooLongColumn}
+	_incorrectTemporalExtractor = &errorColumnExtractor{pattern: reIncorrectTemporalColumn}
+	_incorrectNumericExtractor = &errorColumnExtractor{pattern: reIncorrectNumericColumn}
+	_outOfRangeExtractor      = &errorColumnExtractor{pattern: reOutOfRangeColumn}
+)
+
 // BatchInserter 批量插入器
 type BatchInserter struct {
 	db           *sql.DB
@@ -179,60 +202,16 @@ func (bi *BatchInserter) insertBatchSingleWithAutoWiden(rows [][]interface{}, ca
 }
 
 func autoTextColumn(err error) (string, bool) {
-	if column, ok := dataTooLongColumn(err); ok {
+	if column, ok := _dataTooLongExtractor.extract(err); ok {
 		return column, true
 	}
-	if column, ok := incorrectTemporalColumn(err); ok {
+	if column, ok := _incorrectTemporalExtractor.extract(err); ok {
 		return column, true
 	}
-	if column, ok := incorrectNumericColumn(err); ok {
+	if column, ok := _incorrectNumericExtractor.extract(err); ok {
 		return column, true
 	}
-	return outOfRangeColumn(err)
-}
-
-func dataTooLongColumn(err error) (string, bool) {
-	if err == nil {
-		return "", false
-	}
-	matches := reDataTooLongColumn.FindStringSubmatch(err.Error())
-	if len(matches) != 2 {
-		return "", false
-	}
-	return matches[1], true
-}
-
-func incorrectTemporalColumn(err error) (string, bool) {
-	if err == nil {
-		return "", false
-	}
-	matches := reIncorrectTemporalColumn.FindStringSubmatch(err.Error())
-	if len(matches) != 2 {
-		return "", false
-	}
-	return matches[1], true
-}
-
-func incorrectNumericColumn(err error) (string, bool) {
-	if err == nil {
-		return "", false
-	}
-	matches := reIncorrectNumericColumn.FindStringSubmatch(err.Error())
-	if len(matches) != 2 {
-		return "", false
-	}
-	return matches[1], true
-}
-
-func outOfRangeColumn(err error) (string, bool) {
-	if err == nil {
-		return "", false
-	}
-	matches := reOutOfRangeColumn.FindStringSubmatch(err.Error())
-	if len(matches) != 2 {
-		return "", false
-	}
-	return matches[1], true
+	return _outOfRangeExtractor.extract(err)
 }
 
 func (bi *BatchInserter) widenColumnToText(column string) error {

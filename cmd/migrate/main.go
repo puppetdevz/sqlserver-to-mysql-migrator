@@ -292,17 +292,16 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 	tracker.StartPhase("truncate-existing-tables", len(existingTables))
 	defer tracker.ClearPhase()
 
-	n := len(existingTables)
-	tableChan := make(chan string, n)
+	tableChan := make(chan string, len(existingTables))
 
 	var wg sync.WaitGroup
 	var totalSuccess atomic.Int64
 	var totalFail atomic.Int64
 
 	// 启动 workers
-	for i := 0; i < cfg.Migration.MaxWorkers; i++ {
+	for range cfg.Migration.MaxWorkers {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 			for tableName := range tableChan {
 				select {
@@ -324,7 +323,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 					totalSuccess.Add(1)
 				}
 			}
-		}(i)
+		}()
 	}
 
 	// 分发任务

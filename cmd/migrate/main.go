@@ -299,9 +299,9 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 	var totalFail atomic.Int64
 
 	// 启动 workers
-	for range cfg.Migration.MaxWorkers {
+	for i := range cfg.Migration.MaxWorkers {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
 			for tableName := range tableChan {
 				select {
@@ -311,7 +311,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 				}
 
 				if err := conn.TruncateTable(tableName); err != nil {
-					logger.Warnf("Failed to truncate table %s: %v", tableName, err)
+					logger.Warnf("[Worker %d] Failed to truncate table %s: %v", workerID, tableName, err)
 					tracker.FailPhaseItem()
 					totalFail.Add(1)
 					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
@@ -319,11 +319,12 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 						return
 					}
 				} else {
+					logger.Infof("[Worker %d] Table truncated: %s", workerID, tableName)
 					tracker.CompletePhaseItem()
 					totalSuccess.Add(1)
 				}
 			}
-		}()
+		}(i)
 	}
 
 	// 分发任务

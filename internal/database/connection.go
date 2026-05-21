@@ -193,7 +193,6 @@ func (c *Connection) TruncateTable(tableName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to truncate table %s: %w", actualName, err)
 	}
-	logger.Infof("Table truncated: %s", actualName)
 	return nil
 }
 

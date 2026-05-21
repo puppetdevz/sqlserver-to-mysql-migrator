@@ -568,9 +568,6 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				ti.progressCallback(ti.tableName, csvTotalRows, processedRows, totalRows)
 			}
 
-			if processedRows%50000 == 0 && processedRows > 0 {
-				logger.Infof("Progress: %d rows processed, %d rows inserted", processedRows, totalRows)
-			}
 		}
 	}()
 

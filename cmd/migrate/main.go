@@ -208,8 +208,8 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	// 但 classification.ExistingTables 只包含 DDL 中存在的表，不是全部已存在表
 	if len(classification.ExistingTables) > 0 {
 		if err := truncateExistingTables(conn, classification.ExistingTables, tracker, migrationCtx, cfg); err != nil {
-			logger.Warnf("Some tables failed to truncate: %v", err)
-			// 继续执行，不阻断
+			logger.Errorf("Failed to truncate existing tables: %v", err)
+			return err
 		}
 	}
 
@@ -311,7 +311,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 				}
 
 				if err := conn.TruncateTable(tableName); err != nil {
-					logger.Warnf("[Worker %d] Failed to truncate table %s: %v", workerID, tableName, err)
+					logger.Errorf("[Worker %d] Failed to truncate table %s: %v", workerID, tableName, err)
 					tracker.FailPhaseItem()
 					totalFail.Add(1)
 					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
@@ -363,93 +363,133 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	// 创建转换器
 	tableConverter := converter.NewTableConverter(cfg.Converter)
 
-	// 创建表
-	successCount := 0
-	failCount := 0
+	tableChan := make(chan string, len(missingTables))
+	var totalSuccess atomic.Int64
+	var totalFail atomic.Int64
+	var mu sync.Mutex
 	var failedTableNames []string
 
-	for _, tableName := range missingTables {
-		// 检查是否已收到停止信号
-		select {
-		case <-migrationCtx.Context().Done():
-			logger.Warn("Migration stopped, aborting table creation")
-			return migrationCtx.Err()
-		default:
-		}
+	var wg sync.WaitGroup
 
-		tracker.StartTable(tableName, "", false)
-		lookupName := tableName
-		tableDDL, ok := ddlLookup[tableMatcher.Key(lookupName)]
+	// 启动 workers
+	for i := range cfg.Migration.MaxWorkers {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for tableName := range tableChan {
+				select {
+				case <-migrationCtx.Context().Done():
+					return
+				default:
+				}
 
-		// CSV 文件名尾部 _ 对应 DDL 表名尾部 $，做映射修复
-		if !ok && strings.HasSuffix(lookupName, "_") {
-			mappedName := lookupName[:len(lookupName)-1] + "$"
-			tableDDL, ok = ddlLookup[tableMatcher.Key(mappedName)]
-			if ok {
-				logger.Infof("Table name mapping applied: %s -> %s", tableName, mappedName)
-			}
-		}
+				// 查找 DDL
+				lookupName := tableName
+				tableDDL, ok := ddlLookup[tableMatcher.Key(lookupName)]
 
-		if !ok {
-			attemptedNames := lookupName
-			if strings.HasSuffix(lookupName, "_") {
-				attemptedNames = fmt.Sprintf("%s, %s (with $ suffix)", lookupName, lookupName[:len(lookupName)-1]+"$")
-			}
-			logger.Warnf("Table DDL not found: %s (attempted: %s)", tableName, attemptedNames)
-			tracker.SkipTable(tableName, fmt.Sprintf("DDL not found (attempted: %s)", attemptedNames))
-			tracker.SkipPhaseItem()
-			failedTableNames = append(failedTableNames, tableName)
-			failCount++
-			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-				migrationCtx.Stop(fmt.Errorf("table DDL not found: %s", tableName))
-				return fmt.Errorf("table DDL not found: %s", tableName)
-			}
-			continue
-		}
+				// CSV 文件名尾部 _ 对应 DDL 表名尾部 $，做映射修复
+				if !ok && strings.HasSuffix(lookupName, "_") {
+					mappedName := lookupName[:len(lookupName)-1] + "$"
+					tableDDL, ok = ddlLookup[tableMatcher.Key(mappedName)]
+					if ok {
+						logger.Infof("[Worker %d] Table name mapping applied: %s -> %s", workerID, tableName, mappedName)
+					}
+				}
 
-		// 转换为 MySQL DDL
-		mysqlDDL, err := tableConverter.ConvertToMySQL(tableDDL)
-		if err != nil {
-			logger.Errorf("Failed to convert DDL for table %s: %v", tableName, err)
-			tracker.FailTable(tableName, fmt.Sprintf("DDL conversion failed: %v", err))
-			tracker.FailPhaseItem()
-			failedTableNames = append(failedTableNames, tableName)
-			failCount++
-			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-				migrationCtx.Stop(fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err))
-				return fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err)
-			}
-			continue
-		}
+				if !ok {
+					attemptedNames := lookupName
+					if strings.HasSuffix(lookupName, "_") {
+						attemptedNames = fmt.Sprintf("%s, %s (with $ suffix)", lookupName, lookupName[:len(lookupName)-1]+"$")
+					}
+					logger.Warnf("[Worker %d] Table DDL not found: %s (attempted: %s)", workerID, tableName, attemptedNames)
+					tracker.SkipTable(tableName, fmt.Sprintf("DDL not found (attempted: %s)", attemptedNames))
+					tracker.SkipPhaseItem()
 
-		// 执行 CREATE TABLE
-		if err := conn.ExecuteDDL(mysqlDDL); err != nil {
-			logger.Errorf("Failed to create table %s: %v", tableName, err)
-			tracker.FailTable(tableName, fmt.Sprintf("Table creation failed: %v", err))
-			tracker.FailPhaseItem()
-			failedTableNames = append(failedTableNames, tableName)
-			failCount++
-			if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-				migrationCtx.Stop(fmt.Errorf("failed to create table %s: %w", tableName, err))
-				return fmt.Errorf("failed to create table %s: %w", tableName, err)
-			}
-			continue
-		}
+					mu.Lock()
+					failedTableNames = append(failedTableNames, tableName)
+					mu.Unlock()
+					totalFail.Add(1)
 
-		logger.Infof("Table created: %s", tableName)
-		if *createOnly {
-			if err := tracker.CompleteTable(tableName, 0, 0, 0); err != nil {
-				logger.Warnf("Failed to mark table %s as completed: %v", tableName, err)
+					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
+						migrationCtx.Stop(fmt.Errorf("table DDL not found: %s", tableName))
+						return
+					}
+					continue
+				}
+
+				// 转换为 MySQL DDL
+				mysqlDDL, err := tableConverter.ConvertToMySQL(tableDDL)
+				if err != nil {
+					logger.Errorf("[Worker %d] Failed to convert DDL for table %s: %v", workerID, tableName, err)
+					tracker.FailTable(tableName, fmt.Sprintf("DDL conversion failed: %v", err))
+					tracker.FailPhaseItem()
+
+					mu.Lock()
+					failedTableNames = append(failedTableNames, tableName)
+					mu.Unlock()
+					totalFail.Add(1)
+
+					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
+						migrationCtx.Stop(fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err))
+						return
+					}
+					continue
+				}
+
+				// 执行 CREATE TABLE
+				logger.Infof("[Worker %d] Creating table: %s", workerID, tableName)
+				if err := conn.ExecuteDDL(mysqlDDL); err != nil {
+					logger.Errorf("[Worker %d] Failed to create table %s: %v", workerID, tableName, err)
+					tracker.FailTable(tableName, fmt.Sprintf("Table creation failed: %v", err))
+					tracker.FailPhaseItem()
+
+					mu.Lock()
+					failedTableNames = append(failedTableNames, tableName)
+					mu.Unlock()
+					totalFail.Add(1)
+
+					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
+						migrationCtx.Stop(fmt.Errorf("failed to create table %s: %w", tableName, err))
+						return
+					}
+					continue
+				}
+
+				logger.Infof("[Worker %d] Table created: %s", workerID, tableName)
+				if *createOnly {
+					if err := tracker.CompleteTable(tableName, 0, 0, 0); err != nil {
+						logger.Warnf("[Worker %d] Failed to mark table %s as completed: %v", workerID, tableName, err)
+					}
+				} else {
+					if err := tracker.MarkTableCreated(tableName); err != nil {
+						logger.Warnf("[Worker %d] Failed to mark table %s as created: %v", workerID, tableName, err)
+					}
+				}
+				tracker.CompletePhaseItem()
+				totalSuccess.Add(1)
 			}
-		} else {
-			if err := tracker.MarkTableCreated(tableName); err != nil {
-				logger.Warnf("Failed to mark table %s as created: %v", tableName, err)
-			}
-		}
-		tracker.CompletePhaseItem()
-		successCount++
+		}(i)
 	}
 
+	// 分发任务
+	for _, tableName := range missingTables {
+		if migrationCtx.Context().Err() != nil {
+			break
+		}
+		tracker.StartTable(tableName, "", false)
+		tableChan <- tableName
+	}
+	close(tableChan)
+
+	wg.Wait()
+
+	// context 停止且有错误时返回
+	if err := migrationCtx.Err(); err != nil {
+		return err
+	}
+
+	successCount := int(totalSuccess.Load())
+	failCount := int(totalFail.Load())
 	logger.Infof("Table creation completed: %d success, %d failed", successCount, failCount)
 
 	// 生成表创建报告

@@ -329,11 +329,10 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 
 	// 分发任务
 	for _, tableName := range existingTables {
-		select {
-		case <-migrationCtx.Context().Done():
+		if migrationCtx.Context().Err() != nil {
 			break
-		case tableChan <- tableName:
 		}
+		tableChan <- tableName
 	}
 	close(tableChan)
 

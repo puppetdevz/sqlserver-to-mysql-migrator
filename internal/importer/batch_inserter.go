@@ -41,26 +41,34 @@ var (
 
 // BatchInserter 批量插入器
 type BatchInserter struct {
-	db           *sql.DB
-	tableName    string
-	columns      []string // 只包含数据库中存在的列
-	batchSize    int
-	onDuplicate  string // "replace" or "ignore"
-	stmt         *sql.Stmt
-	cachedRows   int // 缓存语句的行数（用于判断后续批次是否能复用）
-	stmtMu       sync.RWMutex
-	buildQueryMu sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
-	skippedCols  []string   // 跳过的列
+	db            *sql.DB
+	tableName     string
+	quotedTable   string   // 预计算的引用表名
+	columns       []string // 只包含数据库中存在的列
+	quotedColumns []string // 预计算的引用列名
+	batchSize     int
+	onDuplicate   string // "replace" or "ignore"
+	stmt          *sql.Stmt
+	cachedRows    int // 缓存语句的行数（用于判断后续批次是否能复用）
+	stmtMu        sync.RWMutex
+	buildQueryMu  sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
+	skippedCols   []string   // 跳过的列
 }
 
 // NewBatchInserter 创建批量插入器
 func NewBatchInserter(db *sql.DB, tableName string, columns []string, batchSize int, onDuplicate string) *BatchInserter {
+	quotedCols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCols[i] = quoteIdentifier(col)
+	}
 	return &BatchInserter{
-		db:          db,
-		tableName:   tableName,
-		columns:     columns,
-		batchSize:   batchSize,
-		onDuplicate: onDuplicate,
+		db:            db,
+		tableName:     tableName,
+		quotedTable:   quoteIdentifier(tableName),
+		columns:       columns,
+		quotedColumns: quotedCols,
+		batchSize:     batchSize,
+		onDuplicate:   onDuplicate,
 	}
 }
 
@@ -92,13 +100,20 @@ func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []st
 		return nil, skippedColumns
 	}
 
+	quotedCols := make([]string, len(validColumns))
+	for i, col := range validColumns {
+		quotedCols[i] = quoteIdentifier(col)
+	}
+
 	return &BatchInserter{
-		db:          db,
-		tableName:   tableName,
-		columns:     validColumns,
-		batchSize:   batchSize,
-		onDuplicate: onDuplicate,
-		skippedCols: skippedColumns,
+		db:            db,
+		tableName:     tableName,
+		quotedTable:   quoteIdentifier(tableName),
+		columns:       validColumns,
+		quotedColumns: quotedCols,
+		batchSize:     batchSize,
+		onDuplicate:   onDuplicate,
+		skippedCols:   skippedColumns,
 	}, skippedColumns
 }
 
@@ -336,14 +351,10 @@ func (bi *BatchInserter) buildInsertQuery(numRows int) string {
 	}
 
 	// 表名
-	query.WriteString(fmt.Sprintf("`%s` ", bi.tableName))
+	query.WriteString(bi.quotedTable + " ")
 
 	// 列名
-	columnNames := make([]string, len(bi.columns))
-	for i, col := range bi.columns {
-		columnNames[i] = fmt.Sprintf("`%s`", col)
-	}
-	query.WriteString(fmt.Sprintf("(%s) VALUES ", strings.Join(columnNames, ", ")))
+	query.WriteString(fmt.Sprintf("(%s) VALUES ", strings.Join(bi.quotedColumns, ", ")))
 
 	// 值占位符
 	valuePlaceholders := make([]string, numRows)
@@ -365,7 +376,9 @@ func (bi *BatchInserter) Close() error {
 	bi.stmtMu.Lock()
 	defer bi.stmtMu.Unlock()
 	if bi.stmt != nil {
-		return bi.stmt.Close()
+		err := bi.stmt.Close()
+		bi.stmt = nil
+		return err
 	}
 	return nil
 }

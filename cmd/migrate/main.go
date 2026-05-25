@@ -172,6 +172,13 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		logger.Infof("Filtered to %d specified tables", len(allTableNames))
 	}
 
+	// 过滤掉 skip_tables 中配置的表
+	if len(cfg.Migration.SkipTables) > 0 {
+		before := len(allTableNames)
+		allTableNames = excludeTables(allTableNames, cfg.Migration.SkipTables, tableMatcher)
+		logger.Infof("Skipped %d tables per skip_tables config: %v", before-len(allTableNames), cfg.Migration.SkipTables)
+	}
+
 	tracker.SetPlannedTotalTables(len(allTableNames))
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 
@@ -254,6 +261,21 @@ func filterTables(allTables []string, specifiedTables []string, tableMatcher mat
 	}
 
 	return filtered
+}
+
+// excludeTables 从表列表中排除指定的表
+func excludeTables(allTables []string, excludeList []string, tableMatcher matcher.TableNameMatcher) []string {
+	excludeSet := tableMatcher.BuildSet(excludeList)
+
+	var kept []string
+	for _, table := range allTables {
+		if _, ok := excludeSet[tableMatcher.Key(table)]; ok {
+			continue
+		}
+		kept = append(kept, table)
+	}
+
+	return kept
 }
 
 func collectDDLTableNames(allDDLs map[string]*parser.TableDDL) []string {

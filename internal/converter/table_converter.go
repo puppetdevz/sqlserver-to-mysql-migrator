@@ -17,6 +17,48 @@ const mysqlMaxInlineRowBytes = 8000
 // 列被转为 TEXT 后仅占用此字节数，其余数据存储在溢出页中
 const textInlineOverheadBytes = 20
 
+// ConvertMode describes whether generated DDL used normal or aggressive row-size rules.
+type ConvertMode string
+
+const (
+	ConvertModeNormal     ConvertMode = "normal"
+	ConvertModeAggressive ConvertMode = "aggressive"
+)
+
+// DegradationReason explains why a column was degraded to a wider off-page type.
+type DegradationReason string
+
+const (
+	DegradationReasonPredictedRowSize DegradationReason = "predicted_row_size"
+	DegradationReasonError1118        DegradationReason = "error1118"
+)
+
+// ConvertOptions controls row-size degradation behavior for DDL conversion.
+type ConvertOptions struct {
+	Mode                    ConvertMode
+	Reason                  DegradationReason
+	AllowNumericDegradation bool
+}
+
+// ColumnDegradation records one schema change made to reduce MySQL row size.
+type ColumnDegradation struct {
+	TableName            string
+	ColumnName           string
+	SourceType           string
+	TargetType           string
+	Reason               DegradationReason
+	EstimatedBytesBefore int
+	EstimatedBytesAfter  int
+}
+
+// ConvertResult is the structured DDL conversion output used by migration code.
+type ConvertResult struct {
+	SQL               string
+	Mode              ConvertMode
+	EstimatedRowBytes int
+	Degradations      []ColumnDegradation
+}
+
 // TableConverter 表结构转换器
 type TableConverter struct {
 	typeMapper *TypeMapper
@@ -33,7 +75,20 @@ func NewTableConverter(cfg config.ConverterConfig) *TableConverter {
 
 // ConvertToMySQL 将 SQL Server 表定义转换为 MySQL DDL
 func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, error) {
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{})
+	if err != nil {
+		return "", err
+	}
+	return result.SQL, nil
+}
+
+// ConvertToMySQLResult converts SQL Server table DDL to MySQL and returns diagnostics.
+func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, opts ConvertOptions) (ConvertResult, error) {
+	if opts.Mode == "" {
+		opts.Mode = ConvertModeNormal
+	}
 	var ddl strings.Builder
+	result := ConvertResult{Mode: opts.Mode}
 
 	// CREATE TABLE
 	ddl.WriteString(fmt.Sprintf("CREATE TABLE `%s` (\n", tableDDL.TableName))
@@ -97,7 +152,7 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 	for i, column := range tableDDL.Columns {
 		columnDef, err := tc.convertColumnWithTextCheck(column, textColumns, forceTextColumns)
 		if err != nil {
-			return "", fmt.Errorf("failed to convert column %s: %w", column.Name, err)
+			return ConvertResult{}, fmt.Errorf("failed to convert column %s: %w", column.Name, err)
 		}
 		ddl.WriteString("  ")
 		ddl.WriteString(columnDef)
@@ -138,7 +193,9 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 		}
 	}
 
-	return ddl.String(), nil
+	result.SQL = ddl.String()
+	result.EstimatedRowBytes = tc.estimateRowBytes(tableDDL, forceTextColumns)
+	return result, nil
 }
 
 // convertColumnWithTextCheck 转换列定义并记录 TEXT 类型
@@ -238,6 +295,18 @@ func (tc *TableConverter) applyRowSizeGuard(tableDDL *parser.TableDDL, forceText
 		forceTextColumns[candidate.name] = true
 		estimatedBytes -= (candidate.bytes - textInlineOverheadBytes)
 	}
+}
+
+func (tc *TableConverter) estimateRowBytes(tableDDL *parser.TableDDL, forceTextColumns map[string]bool) int {
+	var estimatedBytes int
+	for _, column := range tableDDL.Columns {
+		width, _ := tc.estimatedInlineBytes(column)
+		if forceTextColumns[column.Name] {
+			width = textInlineOverheadBytes
+		}
+		estimatedBytes += width
+	}
+	return estimatedBytes
 }
 
 func (tc *TableConverter) estimatedInlineBytes(column parser.ColumnDef) (int, bool) {

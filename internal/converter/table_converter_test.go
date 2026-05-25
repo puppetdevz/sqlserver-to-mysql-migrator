@@ -363,3 +363,56 @@ func TestConvertToMySQL_RowSizeGuardWideTableLikeFormmain1980(t *testing.T) {
 		t.Fatalf("DDL should include PRIMARY KEY, got:\n%s", ddl)
 	}
 }
+
+func TestConvertToMySQLResultNormalModeReportsEstimate(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  10,
+		MaxNvarcharToTextColumns: 10,
+		MaxNvarcharToTextSize:    500,
+		MaxVarcharToTextSize:     500,
+	})
+
+	tableDDL := &parser.TableDDL{
+		TableName: "narrow_table",
+		Columns: []parser.ColumnDef{
+			{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+			{Name: "name", Type: "nvarchar(100) NULL", Nullable: true},
+		},
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_narrow", Columns: []string{"ID"}},
+	}
+
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{})
+	if err != nil {
+		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
+	}
+	if result.SQL == "" {
+		t.Fatal("ConvertToMySQLResult returned empty SQL")
+	}
+	if result.Mode != ConvertModeNormal {
+		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeNormal)
+	}
+	if result.EstimatedRowBytes <= 0 {
+		t.Fatalf("EstimatedRowBytes = %d, want > 0", result.EstimatedRowBytes)
+	}
+	if len(result.Degradations) != 0 {
+		t.Fatalf("Degradations = %+v, want empty", result.Degradations)
+	}
+}
+
+func TestConvertToMySQLCompatibilityWrapperReturnsSQL(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{})
+	tableDDL := &parser.TableDDL{
+		TableName: "compat_table",
+		Columns: []parser.ColumnDef{
+			{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+		},
+	}
+
+	ddl, err := tc.ConvertToMySQL(tableDDL)
+	if err != nil {
+		t.Fatalf("ConvertToMySQL returned error: %v", err)
+	}
+	if !strings.Contains(ddl, "CREATE TABLE `compat_table`") {
+		t.Fatalf("DDL = %q, want CREATE TABLE for compat_table", ddl)
+	}
+}

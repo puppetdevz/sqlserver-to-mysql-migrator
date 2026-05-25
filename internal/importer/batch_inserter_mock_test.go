@@ -344,19 +344,21 @@ func TestInsertBatchSplitBatch(t *testing.T) {
 		rows[i] = row
 	}
 
-	query1 := bi.buildInsertQuery(253)
+	// maxRowsPerBatch = (65535 * 95) / (100 * 201) = 309
+	// 500 rows split into 309 + 191
+	query1 := bi.buildInsertQuery(309)
 	prep1 := mock.ExpectPrepare(query1)
 	prep1.WillBeClosed()
 	prep1.ExpectExec().
-		WithArgs(anyArgs(253*201)...).
-		WillReturnResult(sqlmock.NewResult(0, 253))
+		WithArgs(anyArgs(309*201)...).
+		WillReturnResult(sqlmock.NewResult(0, 309))
 
-	query2 := bi.buildInsertQuery(247)
+	query2 := bi.buildInsertQuery(191)
 	prep2 := mock.ExpectPrepare(query2)
 	prep2.WillBeClosed()
 	prep2.ExpectExec().
-		WithArgs(anyArgs(247*201)...).
-		WillReturnResult(sqlmock.NewResult(0, 247))
+		WithArgs(anyArgs(191*201)...).
+		WillReturnResult(sqlmock.NewResult(0, 191))
 
 	affected, err := bi.InsertBatch(rows)
 	if err != nil {
@@ -807,26 +809,28 @@ func TestInsertBatchSplitBatchErrorPropagation(t *testing.T) {
 		rows[i] = row
 	}
 
-	query1 := bi.buildInsertQuery(253)
+	// maxRowsPerBatch = (65535 * 95) / (100 * 201) = 309
+	// 500 rows split into 309 + 191, error on second sub-batch
+	query1 := bi.buildInsertQuery(309)
 	prep1 := mock.ExpectPrepare(query1)
 	prep1.WillBeClosed()
 	prep1.ExpectExec().
-		WithArgs(anyArgs(253 * 201)...).
-		WillReturnResult(sqlmock.NewResult(0, 253))
+		WithArgs(anyArgs(309 * 201)...).
+		WillReturnResult(sqlmock.NewResult(0, 309))
 
-	query2 := bi.buildInsertQuery(247)
+	query2 := bi.buildInsertQuery(191)
 	prep2 := mock.ExpectPrepare(query2)
 	prep2.WillBeClosed()
 	prep2.ExpectExec().
-		WithArgs(anyArgs(247 * 201)...).
+		WithArgs(anyArgs(191 * 201)...).
 		WillReturnError(fmt.Errorf("some error"))
 
 	affected, err := bi.InsertBatch(rows)
 	if err == nil {
 		t.Fatal("expected error from split batch")
 	}
-	if affected != 253 {
-		t.Fatalf("affected = %d, want 253", affected)
+	if affected != 309 {
+		t.Fatalf("affected = %d, want 309", affected)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
@@ -850,9 +854,9 @@ func TestInsertBatchMaxRowsPerBatchCalculation(t *testing.T) {
 	for j := range row {
 		row[j] = j
 	}
-	expectedMax := (maxPreparedPlaceholders * 85) / (100 * len(columns))
-	if expectedMax != 51 {
-		t.Fatalf("maxRowsPerBatch = %d, want 51", expectedMax)
+	expectedMax := (maxPreparedPlaceholders * 95) / (100 * len(columns))
+	if expectedMax != 62 {
+		t.Fatalf("maxRowsPerBatch = %d, want 62", expectedMax)
 	}
 
 	query := bi.buildInsertQuery(1)

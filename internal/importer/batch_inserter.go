@@ -9,7 +9,7 @@ import (
 )
 
 // maxPreparedPlaceholders MySQL prepared statement 占位符上限（留有余量）
-const maxPreparedPlaceholders = 60000
+const maxPreparedPlaceholders = 65535
 
 var reDataTooLongColumn = regexp.MustCompile(`Data too long for column '([^']+)'`)
 var reIncorrectTemporalColumn = regexp.MustCompile(`Incorrect (?:date|datetime|time|timestamp) value: .* for column '([^']+)'`)
@@ -170,7 +170,7 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	}
 
 	// 根据列数计算每批最大行数，避免超出 MySQL prepared statement 占位符限制
-	maxRowsPerBatch := (maxPreparedPlaceholders * 85) / (100 * len(bi.columns))
+	maxRowsPerBatch := (maxPreparedPlaceholders * 95) / (100 * len(bi.columns))
 	if maxRowsPerBatch < 1 {
 		maxRowsPerBatch = 1
 	}

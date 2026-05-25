@@ -311,19 +311,27 @@ func scoreValueForColumnType(value string, info dbColumnInfo) int {
 }
 
 func canAbsorbDelimitedFields(columnType string) bool {
-	return strings.ContainsAny(columnType, "chartextblobjson")
+	lower := strings.ToLower(columnType)
+	return strings.Contains(lower, "char") || strings.Contains(lower, "text") ||
+		strings.Contains(lower, "blob") || strings.Contains(lower, "json")
 }
 
 func isIntegerColumnType(columnType string) bool {
-	return strings.ContainsAny(columnType, "intbit")
+	lower := strings.ToLower(columnType)
+	return strings.Contains(lower, "int") || lower == "bit"
 }
 
 func isDecimalColumnType(columnType string) bool {
-	return strings.ContainsAny(columnType, "decimalnumericfloatdoublereal")
+	lower := strings.ToLower(columnType)
+	return strings.Contains(lower, "decimal") || strings.Contains(lower, "numeric") ||
+		strings.Contains(lower, "float") || strings.Contains(lower, "double") ||
+		strings.Contains(lower, "real")
 }
 
 func isTemporalColumnType(columnType string) bool {
-	return strings.ContainsAny(columnType, "datetimeyear")
+	lower := strings.ToLower(columnType)
+	return strings.Contains(lower, "date") || strings.Contains(lower, "time") ||
+		strings.Contains(lower, "year")
 }
 
 func isTemporalValue(value string) bool {
@@ -641,6 +649,11 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			}
 			logger.Debugf("[CSV Reader] Batch %d: %d rows read, took %.1fs, totalRead=%d",
 				batchNum, len(batch), time.Since(batchStart).Seconds(), totalRead)
+			if ti.cfg.Migration.MaxRowsPerTable > 0 && totalRead >= ti.cfg.Migration.MaxRowsPerTable {
+				logger.Infof("Reached max_rows_per_table limit (%d rows) for %s, stopping import",
+					ti.cfg.Migration.MaxRowsPerTable, ti.tableName)
+				return
+			}
 		}
 	}(firstRow) // 无表头模式传递 firstRow，有表头模式传递 nil
 

@@ -129,19 +129,20 @@ func main() {
 	// 启动进度报告器
 	tracker.StartProgressReporter(10 * time.Second)
 
-	// 执行迁移
-	if err := runMigration(cfg, conn, tracker, tableMatcher); err != nil {
+	if *dryRun {
+		logger.Info("=== DRY RUN MODE: no actual changes will be made ===")
+	}
+	if err := runMigration(cfg, conn, tracker, tableMatcher, *dryRun); err != nil {
 		logger.Fatalf("Migration failed: %v", err)
 	}
 
-	// 打印摘要
 	tracker.PrintSummary()
 
 	logger.Info("=== Database Migration Tool Finished ===")
 }
 
-// runMigration 执行迁移（新流程）
-func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker, tableMatcher matcher.TableNameMatcher) error {
+// runMigration executes the full migration pipeline.
+func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker, tableMatcher matcher.TableNameMatcher, dryRun bool) error {
 	// 创建迁移上下文
 	migrationCtx := migration.NewMigrationContext()
 	defer func() {
@@ -185,16 +186,17 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		len(classification.ExistingTables), len(classification.MissingTables))
 
 	// ========== 步骤 2: DDL 转换 + 表创建 ==========
-	// 注意：classification.MissingTables 是基于 DDL 全量表的缺失部分
-	// 这里会创建所有 DDL 中有但数据库中不存在的表
-	if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
+	if dryRun {
+		logger.Infof("[DRY RUN] Would create %d missing tables", len(classification.MissingTables))
+		for _, tableName := range classification.MissingTables {
+			logger.Infof("[DRY RUN]   - %s", tableName)
+		}
+	} else if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
 		if err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher); err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
-			// 继续执行，允许部分表创建失败
 		}
 	}
 
-	// 如果仅创建表，则退出
 	if *createOnly {
 		if err := finalizeCreateOnlyProgress(tracker, classification.ExistingTables, classification.MissingTables, cfg.Migration.CreateMissingTables); err != nil {
 			logger.Warnf("Failed to finalize create-only progress: %v", err)
@@ -204,9 +206,9 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	}
 
 	// ========== 步骤 2.5: TRUNCATE 所有已存在表 ==========
-	// 注意：这里 TRUNCATE 的是 classification.ExistingTables（基于 DDL 全量表）
-	// 但 classification.ExistingTables 只包含 DDL 中存在的表，不是全部已存在表
-	if len(classification.ExistingTables) > 0 {
+	if dryRun {
+		logger.Infof("[DRY RUN] Would truncate %d existing tables (skipped)", len(classification.ExistingTables))
+	} else if len(classification.ExistingTables) > 0 {
 		if err := truncateExistingTables(conn, classification.ExistingTables, tracker, migrationCtx, cfg); err != nil {
 			logger.Errorf("Failed to truncate existing tables: %v", err)
 			return err
@@ -214,16 +216,21 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	}
 
 	// ========== 步骤 3: 数据导入 ==========
-	// 扫描 CSV 文件用于数据导入
 	csvFiles, err := scanCSVFiles(cfg.Source.CSVDirectory)
 	if err != nil {
 		return fmt.Errorf("failed to scan CSV files: %w", err)
 	}
 	logger.Infof("Found %d CSV files", len(csvFiles))
 
-	// 导入数据（仅处理有 CSV 文件的表）
-	if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker, migrationCtx, tableMatcher); err != nil {
-		return fmt.Errorf("failed to import data: %w", err)
+	if dryRun {
+		logger.Infof("[DRY RUN] Would import data from %d CSV files into %d tables (skipped)", len(csvFiles), len(allTableNames))
+		if err := previewCSVImport(cfg, csvFiles, allTableNames, classification.ExistingTables, tableMatcher); err != nil {
+			logger.Errorf("Preview analysis failed: %v", err)
+		}
+	} else {
+		if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker, migrationCtx, tableMatcher); err != nil {
+			return fmt.Errorf("failed to import data: %w", err)
+		}
 	}
 
 	return nil
@@ -669,7 +676,6 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	failCount := 0
 	var failedTables []string
 	var totalRows int64
-	var totalBytes int64
 
 	for result := range resultChan {
 		if result.Success && result.ErrorCount == 0 {
@@ -679,14 +685,13 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 			failedTables = append(failedTables, result.TableName)
 		}
 		totalRows += result.InsertedRows
-		totalBytes += result.ProcessedRows
 	}
 
 	// 打印详细错误汇总
 	printErrorSummary(dataImporter.GetErrorRecorder(), failedTables)
 
-	logger.Infof("Data import completed: %d success, %d failed, %d total rows, %d bytes",
-		successCount, failCount, totalRows, totalBytes)
+	logger.Infof("Data import completed: %d success, %d failed, %d total rows",
+		successCount, failCount, totalRows)
 
 	// 生成数据导入报告
 	generateMigrationReport("Data Import Report", nil, successCount, failCount, failedTables)
@@ -868,5 +873,32 @@ func renameCSVFiles(postfix, dir string, dryRun bool) error {
 	}
 
 	logger.Infof("%d files renamed, %d skipped", renamed, skipped)
+	return nil
+}
+
+// previewCSVImport analyzes CSV-to-table matching without executing imports.
+func previewCSVImport(cfg *config.Config, csvFiles []string, allowedTables, existingTables []string, tableMatcher matcher.TableNameMatcher) error {
+	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
+	allowedSet := tableMatcher.BuildSet(allowedTables)
+	existingSet := tableMatcher.BuildSet(existingTables)
+
+	var matched, unmatched, notAllowed int
+	for tableKey, csvPath := range csvTableMap {
+		if _, ok := allowedSet[tableKey]; !ok {
+			notAllowed++
+			continue
+		}
+
+		if _, ok := existingSet[tableKey]; !ok {
+			unmatched++
+			logger.Debugf("[DRY RUN] CSV %s -> table %s: table does not exist in database",
+				filepath.Base(csvPath), extractTableNameFromFile(filepath.Base(csvPath), cfg.Source.CSVTimestamp))
+			continue
+		}
+		matched++
+	}
+
+	logger.Infof("[DRY RUN] CSV analysis: %d matched, %d no matching table, %d not in scope",
+		matched, unmatched, notAllowed)
 	return nil
 }

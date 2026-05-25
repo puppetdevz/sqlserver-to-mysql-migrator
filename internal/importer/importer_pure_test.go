@@ -245,13 +245,17 @@ func TestScoreValueForColumnType(t *testing.T) {
 	if s := scoreValueForColumnType("", dbColumnInfo{Type: "int"}); s != 1 {
 		t.Fatalf("empty value score = %d, want 1", s)
 	}
-	// Column that can absorb delimited fields always scores 1
-	if s := scoreValueForColumnType("42", dbColumnInfo{Type: "int"}); s != 1 {
-		t.Fatalf("absorbable column score = %d, want 1", s)
+	// Integer column with valid integer value
+	if s := scoreValueForColumnType("42", dbColumnInfo{Type: "int"}); s != 3 {
+		t.Fatalf("valid integer score = %d, want 3", s)
+	}
+	// Integer column with invalid value
+	if s := scoreValueForColumnType("abc", dbColumnInfo{Type: "int"}); s != -5 {
+		t.Fatalf("invalid integer score = %d, want -5", s)
 	}
 	// Temporal column with valid date
-	if s := scoreValueForColumnType("2020-01-01", dbColumnInfo{Type: "date"}); s != 1 {
-		t.Fatalf("date is absorbable, score = %d, want 1", s)
+	if s := scoreValueForColumnType("2020-01-01", dbColumnInfo{Type: "date"}); s != 3 {
+		t.Fatalf("valid date score = %d, want 3", s)
 	}
 	// Unknown column type with no matching heuristic → default 0
 	if s := scoreValueForColumnType("anything", dbColumnInfo{Type: "gkp"}); s != 0 {
@@ -267,9 +271,9 @@ func TestScoreRowAgainstColumnTypes(t *testing.T) {
 		{Name: "note", Type: "gkp"},
 	}
 	s := scoreRowAgainstColumnTypes(row, infos)
-	// "int" is absorbable → 1, "varchar" → 1, "" → 1 → total 3
-	if s != 3 {
-		t.Fatalf("score = %d, want 3", s)
+	// "42" vs int → valid integer → 3, "hello" vs varchar → canAbsorb → 1, "" → 1 → total 5
+	if s != 5 {
+		t.Fatalf("score = %d, want 5", s)
 	}
 }
 
@@ -380,8 +384,9 @@ func TestScoreValueForColumnTypeGKPType(t *testing.T) {
 }
 
 func TestScoreValueForColumnTypeAbsorbableTypes(t *testing.T) {
-	// All types containing "chartextblobjson" return 1 for non-empty values
-	for _, ct := range []string{"int", "varchar", "text", "blob", "json", "date", "float", "double", "decimal", "bigint", "timestamp"} {
+	// Only text-like types (char, text, blob, json) can absorb delimited fields
+	absorbable := []string{"varchar", "char", "text", "tinytext", "mediumtext", "longtext", "blob", "tinyblob", "mediumblob", "longblob", "json"}
+	for _, ct := range absorbable {
 		t.Run(ct, func(t *testing.T) {
 			got := scoreValueForColumnType("42", dbColumnInfo{Type: ct})
 			if got != 1 {
@@ -389,6 +394,47 @@ func TestScoreValueForColumnTypeAbsorbableTypes(t *testing.T) {
 			}
 		})
 	}
+	// Non-text types should not be treated as absorbable
+	t.Run("int_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("42", dbColumnInfo{Type: "int"}); got != 3 {
+			t.Fatalf("int score = %d, want 3", got)
+		}
+	})
+	t.Run("bigint_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("42", dbColumnInfo{Type: "bigint"}); got != 3 {
+			t.Fatalf("bigint score = %d, want 3", got)
+		}
+	})
+	t.Run("float_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("42", dbColumnInfo{Type: "float"}); got != 3 {
+			t.Fatalf("float score = %d, want 3", got)
+		}
+	})
+	t.Run("double_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("42", dbColumnInfo{Type: "double"}); got != 3 {
+			t.Fatalf("double score = %d, want 3", got)
+		}
+	})
+	t.Run("decimal_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("42", dbColumnInfo{Type: "decimal"}); got != 3 {
+			t.Fatalf("decimal score = %d, want 3", got)
+		}
+	})
+	t.Run("date_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("2020-01-01", dbColumnInfo{Type: "date"}); got != 3 {
+			t.Fatalf("date score = %d, want 3", got)
+		}
+	})
+	t.Run("datetime_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("2020-01-01 10:30:00", dbColumnInfo{Type: "datetime"}); got != 3 {
+			t.Fatalf("datetime score = %d, want 3", got)
+		}
+	})
+	t.Run("timestamp_not_absorbable", func(t *testing.T) {
+		if got := scoreValueForColumnType("2020-01-01 10:30:00", dbColumnInfo{Type: "timestamp"}); got != 3 {
+			t.Fatalf("timestamp score = %d, want 3", got)
+		}
+	})
 }
 
 // ============================================================================
@@ -430,10 +476,10 @@ func TestRepairDelimitedRowExtraFieldsOutOfRange(t *testing.T) {
 	row := []string{"a", "b", "c"}
 	infos := []dbColumnInfo{
 		{Name: "col", Type: "varchar"},
-		{Name: "extra", Type: "int"},
+		{Name: "extra", Type: "text"},
 	}
-	// extraFields=1, i=1 → 1+1=2 < 3, OK. i=1: candidate ["a", "b,c"]
-	// But wait, "int" contains "t" so absorbable. So this would try to absorb.
+	// extraFields=1, i=0 candidate ["a,b","c"] → score 2, i=1 candidate ["a","b,c"] → score 2
+	// bestIdx=0 → collapse at 0: ["a,b", "c"] → len 2
 	result := repairDelimitedRow(row, infos)
 	if len(result) != 2 {
 		t.Fatalf("len = %d, want 2", len(result))

@@ -107,28 +107,33 @@ func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []st
 func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, error) {
 	if canCache {
 		bi.stmtMu.Lock()
-		defer bi.stmtMu.Unlock()
 
-		// 如果有缓存的 statement，检查 query 是否匹配
 		if bi.stmt != nil {
 			// 通过占位符数量判断 query 是否相同
 			cachedPlaceholders := bi.cachedRows * len(bi.columns)
 			newPlaceholders := strings.Count(query, "?")
 			if cachedPlaceholders == newPlaceholders {
 				// query 相同，可以复用
-				return bi.stmt, false, nil
+				stmt := bi.stmt
+				bi.stmtMu.Unlock()
+				return stmt, false, nil
 			}
 			// query 不同，关闭旧 statement，使用新 query
 			bi.stmt.Close()
 			bi.stmt = nil
 		}
 
+		// 释放锁后再 Prepare，避免长时间持有写锁阻塞其他 goroutine
+		bi.stmtMu.Unlock()
 		stmt, err := bi.db.Prepare(query)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 		}
+
+		bi.stmtMu.Lock()
 		bi.stmt = stmt
-		bi.cachedRows = 0 // 重置，等待 insertBatchSingle 更新
+		bi.cachedRows = 0
+		bi.stmtMu.Unlock()
 		return stmt, false, nil
 	}
 
@@ -137,7 +142,9 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	bi.cachedRows = 0 // 不使用缓存，重置容量标记
+	bi.stmtMu.Lock()
+	bi.cachedRows = 0
+	bi.stmtMu.Unlock()
 	return stmt, true, nil
 }
 

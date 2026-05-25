@@ -557,6 +557,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			if result.err != nil {
 				errorCount++
 				lastErr = result.err
+				logger.Debugf("[Aggregator] batch %d: error=%v", result.batchNum, result.err)
 				if !fastFail {
 					allErrors = append(allErrors, result.err)
 				}
@@ -569,18 +570,25 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			}
 
 		}
+		logger.Debugf("[Aggregator] resultChan closed: processedRows=%d, totalRows=%d, errorCount=%d", processedRows, totalRows, errorCount)
 	}()
 
 	// 启动 CSV 读取 goroutine
 	wg.Add(1)
 	go func(firstData []string) {
-		defer wg.Done()
-		defer close(batchChan)
-
 		var lineNum int
 		var batchNum int
+		var totalRead int
+		var batchStart time.Time
+
+		defer wg.Done()
+		defer func() {
+			close(batchChan)
+			logger.Debugf("[CSV Reader] batchChan closed after %d batches, totalRead=%d", batchNum, totalRead)
+		}()
 
 		for {
+			batchStart = time.Now()
 			var batch [][]string
 
 			if firstData != nil {
@@ -625,20 +633,29 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			}
 
 			batchNum++
+			totalRead += len(batch)
 			select {
 			case batchChan <- batchData{rows: processedBatch, batchNum: batchNum, err: nil}:
 			case <-csvDone:
 				return
 			}
+			logger.Debugf("[CSV Reader] Batch %d: %d rows read, took %.1fs, totalRead=%d",
+				batchNum, len(batch), time.Since(batchStart).Seconds(), totalRead)
 		}
 	}(firstRow) // 无表头模式传递 firstRow，有表头模式传递 nil
 
 	// 启动数据库写入 goroutine
 	wg.Add(1)
 	go func() {
+		var totalInserted int64
 		defer wg.Done()
+		defer func() {
+			close(resultChan)
+			logger.Debugf("[DB Writer] resultChan closed, totalInserted=%d", totalInserted)
+		}()
 
 		for bd := range batchChan {
+			batchStart := time.Now()
 			// CSV 读取错误，跳过插入但传递结果
 			if bd.err != nil {
 				resultChan <- batchResult{
@@ -676,16 +693,17 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				if fastFail {
 					csvDoneOnce.Do(func() { close(csvDone) })
 				}
+			} else {
+				totalInserted += affected
+				logger.Debugf("[DB Writer] Batch %d: %d rows inserted, took %.1fs, totalInserted=%d",
+					bd.batchNum, affected, time.Since(batchStart).Seconds(), totalInserted)
 			}
 		}
 	}()
 
 	wg.Wait()
 
-	// 关闭 resultChan 表示不再有结果
-	close(resultChan)
-
-	// 等待 aggregator goroutine 完成
+	// 等待 aggregator goroutine 完成（resultChan 由 DB writer goroutine 关闭）
 	<-aggregatorDone
 
 	if fastFail && lastErr != nil {

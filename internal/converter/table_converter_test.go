@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,8 +47,8 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		}
 	})
 
-	t.Run("9 varchar(300) cols below threshold, keep VARCHAR", func(t *testing.T) {
-		cols := make([]parser.ColumnDef, 9)
+	t.Run("6 varchar(300) cols below count threshold and row size guard, keep VARCHAR", func(t *testing.T) {
+		cols := make([]parser.ColumnDef, 6)
 		for i := range cols {
 			cols[i] = parser.ColumnDef{
 				Name:     "small_varchar_" + strconv.Itoa(i),
@@ -68,7 +69,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 			t.Errorf("DDL should contain varchar(300), got:\n%s", ddl)
 		}
 		// Should not contain TEXT for these columns
-		for i := 0; i < 9; i++ {
+		for i := 0; i < 6; i++ {
 			name := "small_varchar_" + strconv.Itoa(i)
 			if strings.Contains(ddl, "`"+name+"` text") {
 				t.Errorf("DDL should not contain `%s` text (below threshold), got:\n%s", name, ddl)
@@ -237,8 +238,9 @@ func TestConvertToMySQL_RowSizeGuardConvertsManyMediumVarchars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConvertToMySQL returned error: %v", err)
 	}
-	if !strings.Contains(ddl, "`field0` text") {
-		t.Fatalf("DDL should convert some medium varchar columns to text, got:\n%s", ddl)
+	textCount := strings.Count(ddl, "` text")
+	if textCount < 160 {
+		t.Fatalf("DDL should convert most (169/180) nvarchar columns to text, got %d text columns:\n%s", textCount, ddl)
 	}
 	if !strings.Contains(ddl, "`ID` bigint NOT NULL") || !strings.Contains(ddl, "PRIMARY KEY (`ID`)") {
 		t.Fatalf("DDL should keep primary key column inline and indexed, got:\n%s", ddl)
@@ -285,5 +287,79 @@ func TestConvertToMySQL_RowSizeGuardKeepsIndexedColumnsInline(t *testing.T) {
 	}
 	if !strings.Contains(ddl, "CREATE INDEX `IDX_indexed_code` ON `wide_table` (`indexed_code`);") {
 		t.Fatalf("DDL should keep index on indexed_code, got:\n%s", ddl)
+	}
+}
+
+func TestConvertToMySQL_RowSizeGuardWideTableLikeFormmain1980(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  10,
+		MaxNvarcharToTextColumns: 10,
+		MaxNvarcharToTextSize:    500,
+		MaxVarcharToTextSize:     500,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+		{Name: "state", Type: "int NULL", Nullable: true},
+		{Name: "start_date", Type: "datetime NULL", Nullable: true},
+	}
+	// 132 nvarchar(100) like sample_main_103
+	for i := 1; i <= 132; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	// 15 nvarchar(20) like sample_main_103
+	for i := 201; i <= 215; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(20) NULL",
+			Nullable: true,
+		})
+	}
+	// 128 numeric columns
+	for i := 301; i <= 428; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "numeric(20,2) NULL",
+			Nullable: true,
+		})
+	}
+	// 98 large nvarchar (stage 1 converts to TEXT)
+	for i := 501; i <= 598; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(1000) NULL",
+			Nullable: true,
+		})
+	}
+
+	tableDDL := &parser.TableDDL{
+		TableName: "wide_sample",
+		Columns:   cols,
+		PrimaryKey: &parser.PrimaryKeyDef{
+			Name:    "PK_wide",
+			Columns: []string{"ID"},
+		},
+	}
+
+	ddl, err := tc.ConvertToMySQL(tableDDL)
+	if err != nil {
+		t.Fatalf("ConvertToMySQL returned error: %v", err)
+	}
+	// 98 large nvarchar (stage 1 size threshold) + 132 nvarchar(100) + 15 nvarchar(20)
+	// all converted to TEXT by row size guard = 245 total
+	textCount := strings.Count(ddl, "` text")
+	if textCount < 220 {
+		t.Fatalf("DDL should convert ~245 nvarchar columns to text, got %d text columns:\n%s", textCount, ddl)
+	}
+	// Primary key should be preserved
+	if !strings.Contains(ddl, "`ID` bigint NOT NULL") {
+		t.Fatalf("DDL should keep ID bigint, got:\n%s", ddl)
+	}
+	if !strings.Contains(ddl, "PRIMARY KEY (`ID`)") {
+		t.Fatalf("DDL should include PRIMARY KEY, got:\n%s", ddl)
 	}
 }

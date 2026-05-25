@@ -10,9 +10,12 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 )
 
-// 包级别正则已移至 type_mapper.go（reNvarchar, reVarchar, reTrimNullable）
-// 阈值常量也在 type_mapper.go（VarcharThreshold=256, NvarcharThreshold=192）
-const mysqlMaxInlineRowBytes = 60000
+// 包级正则和 varchar/nvarchar 阈值常量定义在 type_mapper.go 中
+const mysqlMaxInlineRowBytes = 8000
+
+// textInlineOverheadBytes 是 MySQL ROW_FORMAT=DYNAMIC 下 TEXT/BLOB 列的行内前缀大小，
+// 列被转为 TEXT 后仅占用此字节数，其余数据存储在溢出页中
+const textInlineOverheadBytes = 20
 
 // TableConverter 表结构转换器
 type TableConverter struct {
@@ -233,7 +236,7 @@ func (tc *TableConverter) applyRowSizeGuard(tableDDL *parser.TableDDL, forceText
 			break
 		}
 		forceTextColumns[candidate.name] = true
-		estimatedBytes -= candidate.bytes
+		estimatedBytes -= (candidate.bytes - textInlineOverheadBytes)
 	}
 }
 
@@ -248,7 +251,7 @@ func (tc *TableConverter) estimatedInlineBytes(column parser.ColumnDef) (int, bo
 	}
 	if matches := reVarchar.FindStringSubmatch(sqlType); len(matches) > 0 {
 		if matches[1] == "max" {
-			return 20, false
+			return textInlineOverheadBytes, false
 		}
 		n, _ := strconv.Atoi(matches[1])
 		return n * 4, true
@@ -282,7 +285,7 @@ func (tc *TableConverter) estimatedInlineBytes(column parser.ColumnDef) (int, bo
 	case strings.HasPrefix(sqlType, "real"):
 		return 4, false
 	case strings.Contains(sqlType, "text"), strings.Contains(sqlType, "image"), strings.Contains(sqlType, "binary"):
-		return 20, false
+		return textInlineOverheadBytes, false
 	default:
 		return 16, false
 	}

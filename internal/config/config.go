@@ -45,6 +45,7 @@ type MigrationConfig struct {
 	CreateMissingTables    bool   `yaml:"create_missing_tables"`
 	OnDuplicate      string `yaml:"on_duplicate"`       // "replace" or "ignore"
 	MaxRowsPerTable  int    `yaml:"max_rows_per_table"`  // 每表最大导入行数，0 表示不限制
+	SkipTables       []string `yaml:"skip_tables"`         // 要跳过的表名列表
 }
 
 // LoggingConfig 日志配置

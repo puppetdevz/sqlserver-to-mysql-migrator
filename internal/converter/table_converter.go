@@ -2,7 +2,6 @@ package converter
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -11,8 +10,6 @@ import (
 )
 
 // 包级正则和 varchar/nvarchar 阈值常量定义在 type_mapper.go 中
-const mysqlMaxInlineRowBytes = 8000
-
 // textInlineOverheadBytes 是 MySQL ROW_FORMAT=DYNAMIC 下 TEXT/BLOB 列的行内前缀大小，
 // 列被转为 TEXT 后仅占用此字节数，其余数据存储在溢出页中
 const textInlineOverheadBytes = 20
@@ -146,7 +143,20 @@ func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, opts C
 			forceTextColumns[col] = true
 		}
 	}
-	tc.applyRowSizeGuard(tableDDL, forceTextColumns)
+
+	initialEstimate := tc.estimateRowBytes(tableDDL, forceTextColumns)
+	result.EstimatedRowBytes = initialEstimate
+	allowNumeric := opts.AllowNumericDegradation || opts.Reason == DegradationReasonError1118
+	shouldAggressivelyDegrade := opts.Mode == ConvertModeAggressive || initialEstimate > tc.rowSizeSafeLimit()
+	if shouldAggressivelyDegrade {
+		if opts.Reason == "" {
+			opts.Reason = DegradationReasonPredictedRowSize
+		}
+		result.Mode = ConvertModeAggressive
+		degradations, estimatedBytes := tc.applyAggressiveDegradation(tableDDL, forceTextColumns, opts.Reason, allowNumeric)
+		result.Degradations = append(result.Degradations, degradations...)
+		result.EstimatedRowBytes = estimatedBytes
+	}
 
 	// 列定义
 	for i, column := range tableDDL.Columns {
@@ -256,57 +266,33 @@ func (tc *TableConverter) extractType(typeDef string) string {
 	return strings.TrimSpace(typeDef)
 }
 
-func (tc *TableConverter) applyRowSizeGuard(tableDDL *parser.TableDDL, forceTextColumns map[string]bool) {
-	indexedColumns := make(map[string]bool)
-	if tableDDL.PrimaryKey != nil {
-		for _, col := range tableDDL.PrimaryKey.Columns {
-			indexedColumns[col] = true
-		}
-	}
-	for _, index := range tableDDL.Indexes {
-		for _, col := range index.Columns {
-			indexedColumns[col] = true
-		}
-	}
+func (tc *TableConverter) applyAggressiveDegradation(
+	tableDDL *parser.TableDDL,
+	forceTextColumns map[string]bool,
+	reason DegradationReason,
+	allowNumeric bool,
+) ([]ColumnDegradation, int) {
+	estimatedBytes := tc.estimateRowBytes(tableDDL, forceTextColumns)
+	degradations := make([]ColumnDegradation, 0)
 
-	type candidate struct {
-		name  string
-		bytes int
-	}
-
-	var estimatedBytes int
-	var candidates []candidate
-	for _, column := range tableDDL.Columns {
-		width, ok := tc.estimatedInlineBytes(column)
-		estimatedBytes += width
-		if ok && !forceTextColumns[column.Name] && !indexedColumns[column.Name] {
-			candidates = append(candidates, candidate{name: column.Name, bytes: width})
-		}
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].bytes > candidates[j].bytes
-	})
-
-	for _, candidate := range candidates {
-		if estimatedBytes <= mysqlMaxInlineRowBytes {
+	for _, candidate := range tc.aggressiveCandidates(tableDDL, forceTextColumns, allowNumeric) {
+		if estimatedBytes <= tc.rowSizeSafeLimit() {
 			break
 		}
+		before := estimatedBytes
 		forceTextColumns[candidate.name] = true
 		estimatedBytes -= (candidate.bytes - textInlineOverheadBytes)
+		degradations = append(degradations, ColumnDegradation{
+			TableName:            tableDDL.TableName,
+			ColumnName:           candidate.name,
+			SourceType:           candidate.sourceType,
+			TargetType:           "text",
+			Reason:               reason,
+			EstimatedBytesBefore: before,
+			EstimatedBytesAfter:  estimatedBytes,
+		})
 	}
-}
-
-func (tc *TableConverter) estimateRowBytes(tableDDL *parser.TableDDL, forceTextColumns map[string]bool) int {
-	var estimatedBytes int
-	for _, column := range tableDDL.Columns {
-		width, _ := tc.estimatedInlineBytes(column)
-		if forceTextColumns[column.Name] {
-			width = textInlineOverheadBytes
-		}
-		estimatedBytes += width
-	}
-	return estimatedBytes
+	return degradations, estimatedBytes
 }
 
 func (tc *TableConverter) estimatedInlineBytes(column parser.ColumnDef) (int, bool) {

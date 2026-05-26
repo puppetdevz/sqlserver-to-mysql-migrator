@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ type TableImporter struct {
 	csvPath          string
 	errorRecorder    *ErrorRecorder
 	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
+	ctx              context.Context
 }
 
 type dbColumnInfo struct {
@@ -50,12 +52,19 @@ func NewTableImporter(conn *database.Connection, cfg *config.Config, tableName s
 		tableName:     tableName,
 		csvPath:       csvPath,
 		errorRecorder: errorRecorder,
+		ctx:           context.Background(),
 	}
 }
 
 // WithProgressCallback sets a per-batch progress callback for long-running imports.
 func (ti *TableImporter) WithProgressCallback(callback func(tableName string, totalRows, processedRows, insertedRows int64)) *TableImporter {
 	ti.progressCallback = callback
+	return ti
+}
+
+// WithContext sets a context for cancellation support.
+func (ti *TableImporter) WithContext(ctx context.Context) *TableImporter {
+	ti.ctx = ctx
 	return ti
 }
 
@@ -512,6 +521,8 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		}
 		return nil, fmt.Errorf("no valid columns to insert for table %s", actualTableName), diag
 	}
+	inserter.SetMaxBatchBytes(ti.cfg.Migration.MaxBatchBytes)
+	inserter.SetContext(ti.ctx)
 	defer inserter.Close()
 
 	// 记录跳过的列
@@ -598,6 +609,19 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		for {
 			batchStart = time.Now()
 			var batch [][]string
+
+			// 检查取消信号
+			select {
+			case <-ti.ctx.Done():
+				csvDoneOnce.Do(func() { close(csvDone) })
+				// 发送取消错误到 batchChan，让 DB writer 感知
+				select {
+				case batchChan <- batchData{batchNum: batchNum, err: ti.ctx.Err()}:
+				case <-csvDone:
+				}
+				return
+			default:
+			}
 
 			if firstData != nil {
 				// 无表头模式：先处理 firstData，再继续读取
@@ -917,6 +941,7 @@ type DataImporter struct {
 	cfg              *config.Config
 	errorRecorder    *ErrorRecorder
 	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
+	ctx              context.Context
 }
 
 // NewDataImporter 创建数据导入协调器
@@ -930,12 +955,19 @@ func NewDataImporter(conn *database.Connection, cfg *config.Config) *DataImporte
 		conn:          conn,
 		cfg:           cfg,
 		errorRecorder: errorRecorder,
+		ctx:           context.Background(),
 	}
 }
 
 // WithProgressCallback sets a per-batch progress callback for table imports.
 func (di *DataImporter) WithProgressCallback(callback func(tableName string, totalRows, processedRows, insertedRows int64)) *DataImporter {
 	di.progressCallback = callback
+	return di
+}
+
+// WithContext sets a context for cancellation support in table imports.
+func (di *DataImporter) WithContext(ctx context.Context) *DataImporter {
+	di.ctx = ctx
 	return di
 }
 
@@ -952,6 +984,7 @@ func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *Im
 	if di.progressCallback != nil {
 		importer.WithProgressCallback(di.progressCallback)
 	}
+	importer.WithContext(di.ctx)
 
 	// 执行导入
 	return importer.Import()

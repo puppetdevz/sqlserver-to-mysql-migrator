@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"regexp"
@@ -10,6 +11,9 @@ import (
 
 // maxPreparedPlaceholders MySQL prepared statement 占位符上限（留有余量）
 const maxPreparedPlaceholders = 65535
+
+// maxBatchBytes 单批次数据量上限（估算值，留一半余量避免超过 max_allowed_packet 64MB）
+const maxBatchBytes = 32 * 1024 * 1024
 
 var reDataTooLongColumn = regexp.MustCompile(`Data too long for column '([^']+)'`)
 var reIncorrectTemporalColumn = regexp.MustCompile(`Incorrect (?:date|datetime|time|timestamp) value: .* for column '([^']+)'`)
@@ -53,6 +57,8 @@ type BatchInserter struct {
 	stmtMu        sync.RWMutex
 	buildQueryMu  sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
 	skippedCols   []string   // 跳过的列
+	maxBatchBytes int64      // 单批次最大字节数，默认 32MB
+	ctx           context.Context
 }
 
 // NewBatchInserter 创建批量插入器
@@ -69,12 +75,26 @@ func NewBatchInserter(db *sql.DB, tableName string, columns []string, batchSize 
 		quotedColumns: quotedCols,
 		batchSize:     batchSize,
 		onDuplicate:   onDuplicate,
+		maxBatchBytes: maxBatchBytes,
+		ctx:           context.Background(),
 	}
 }
 
 // GetSkippedColumns 获取跳过的列列表
 func (bi *BatchInserter) GetSkippedColumns() []string {
 	return bi.skippedCols
+}
+
+// SetMaxBatchBytes 设置单批次最大字节数，0 保持默认值
+func (bi *BatchInserter) SetMaxBatchBytes(bytes int) {
+	if bytes > 0 {
+		bi.maxBatchBytes = int64(bytes)
+	}
+}
+
+// SetContext sets the context for SQL execution cancellation.
+func (bi *BatchInserter) SetContext(ctx context.Context) {
+	bi.ctx = ctx
 }
 
 // NewBatchInserterWithDBColumns 创建批量插入器（使用数据库列过滤 CSV 列）
@@ -114,6 +134,8 @@ func NewBatchInserterWithDBColumns(db *sql.DB, tableName string, csvColumns []st
 		batchSize:     batchSize,
 		onDuplicate:   onDuplicate,
 		skippedCols:   skippedColumns,
+		maxBatchBytes: maxBatchBytes,
+		ctx:           context.Background(),
 	}, skippedColumns
 }
 
@@ -163,7 +185,27 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 	return stmt, true, nil
 }
 
-// InsertBatch 批量插入数据（超宽表自动拆分）
+// estimateBatchBytes 估算一批行序列化后的字节大小
+func estimateBatchBytes(rows [][]interface{}) int64 {
+	var total int64
+	for _, row := range rows {
+		for _, v := range row {
+			switch val := v.(type) {
+			case string:
+				total += int64(len(val))
+			case []byte:
+				total += int64(len(val))
+			case nil:
+				total += 4 // NULL 占位
+			default:
+				total += 16 // 数值类型默认估算
+			}
+		}
+	}
+	return total
+}
+
+// InsertBatch 批量插入数据（按占位符和字节数自动拆分）
 func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -175,31 +217,35 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 		maxRowsPerBatch = 1
 	}
 
-	if len(rows) <= maxRowsPerBatch {
+	if len(rows) <= maxRowsPerBatch && estimateBatchBytes(rows) <= bi.maxBatchBytes {
 		bi.stmtMu.RLock()
 		cachedCapacity := bi.cachedRows
 		bi.stmtMu.RUnlock()
 
 		if cachedCapacity > 0 && len(rows) < cachedCapacity {
-			// cached stmt expects more placeholders than we have rows — close old stmt and create new one
 			bi.resetStmt()
 			return bi.insertBatchSingleWithAutoWiden(rows, false)
 		}
 		return bi.insertBatchSingleWithAutoWiden(rows, true) // 单批次，可缓存
 	}
 
-	// 拆分为多个小批次（各批次行数可能不同，不缓存以避免占位符数量不匹配）
+	// 拆分为多个小批次（按占位符和字节数双重限制，不缓存）
 	var totalAffected int64
-	for i := 0; i < len(rows); i += maxRowsPerBatch {
+	for i := 0; i < len(rows); {
 		end := i + maxRowsPerBatch
 		if end > len(rows) {
 			end = len(rows)
 		}
-		affected, err := bi.insertBatchSingleWithAutoWiden(rows[i:end], false) // 拆分的批次，不缓存
+		// 字节数限制：二分法找最大不超限的子批次
+		for end > i+1 && estimateBatchBytes(rows[i:end]) > bi.maxBatchBytes {
+			end = (i + end) / 2
+		}
+		affected, err := bi.insertBatchSingleWithAutoWiden(rows[i:end], false)
 		if err != nil {
 			return totalAffected, err
 		}
 		totalAffected += affected
+		i = end
 	}
 	return totalAffected, nil
 }
@@ -238,7 +284,7 @@ func autoTextColumn(err error) (string, bool) {
 
 func (bi *BatchInserter) widenColumnToText(column string) error {
 	var dataType, isNullable, columnKey string
-	err := bi.db.QueryRow(`
+	err := bi.db.QueryRowContext(bi.ctx, `
 SELECT DATA_TYPE, IS_NULLABLE, COLUMN_KEY
 FROM information_schema.COLUMNS
 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
@@ -266,7 +312,7 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
 		nextType,
 		nullability,
 	)
-	if _, err := bi.db.Exec(query); err != nil {
+	if _, err := bi.db.ExecContext(bi.ctx, query); err != nil {
 		return fmt.Errorf("failed to alter column: %w", err)
 	}
 	return nil
@@ -318,7 +364,7 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 		args = append(args, row...)
 	}
 
-	result, err := stmt.Exec(args...)
+	result, err := stmt.ExecContext(bi.ctx, args...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute batch insert: %w", err)
 	}

@@ -472,6 +472,10 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 					mu.Unlock()
 					totalFail.Add(1)
 
+					// Error 1118 有兜底机制（自动写 TXT + 排除），豁免 fast_fail 以收集完整列表
+					if isMySQLRowSizeTooLarge(err) {
+						continue
+					}
 					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
 						migrationCtx.Stop(fmt.Errorf("failed to create table %s: %w", tableName, err))
 						return

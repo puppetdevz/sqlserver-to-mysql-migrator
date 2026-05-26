@@ -363,3 +363,196 @@ func TestConvertToMySQL_RowSizeGuardWideTableLikeFormmain1980(t *testing.T) {
 		t.Fatalf("DDL should include PRIMARY KEY, got:\n%s", ddl)
 	}
 }
+
+func TestConvertToMySQLResultNormalModeReportsEstimate(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  10,
+		MaxNvarcharToTextColumns: 10,
+		MaxNvarcharToTextSize:    500,
+		MaxVarcharToTextSize:     500,
+	})
+
+	tableDDL := &parser.TableDDL{
+		TableName: "narrow_table",
+		Columns: []parser.ColumnDef{
+			{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+			{Name: "name", Type: "nvarchar(100) NULL", Nullable: true},
+		},
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_narrow", Columns: []string{"ID"}},
+	}
+
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{})
+	if err != nil {
+		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
+	}
+	if result.SQL == "" {
+		t.Fatal("ConvertToMySQLResult returned empty SQL")
+	}
+	if result.Mode != ConvertModeNormal {
+		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeNormal)
+	}
+	if result.EstimatedRowBytes <= 0 {
+		t.Fatalf("EstimatedRowBytes = %d, want > 0", result.EstimatedRowBytes)
+	}
+	if len(result.Degradations) != 0 {
+		t.Fatalf("Degradations = %+v, want empty", result.Degradations)
+	}
+}
+
+func TestConvertToMySQLCompatibilityWrapperReturnsSQL(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{})
+	tableDDL := &parser.TableDDL{
+		TableName: "compat_table",
+		Columns: []parser.ColumnDef{
+			{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+		},
+	}
+
+	ddl, err := tc.ConvertToMySQL(tableDDL)
+	if err != nil {
+		t.Fatalf("ConvertToMySQL returned error: %v", err)
+	}
+	if !strings.Contains(ddl, "CREATE TABLE `compat_table`") {
+		t.Fatalf("DDL = %q, want CREATE TABLE for compat_table", ddl)
+	}
+}
+
+func TestConvertToMySQLResultPredictedRowSizeTriggersAggressiveStringDegradation(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  999,
+		MaxNvarcharToTextColumns: 999,
+		MaxNvarcharToTextSize:    9999,
+		MaxVarcharToTextSize:     9999,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+	}
+	for i := 0; i < 220; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName:  "wide_predicted",
+		Columns:    cols,
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_wide_predicted", Columns: []string{"ID"}},
+	}
+
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{})
+	if err != nil {
+		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
+	}
+	if result.Mode != ConvertModeAggressive {
+		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeAggressive)
+	}
+	if len(result.Degradations) == 0 {
+		t.Fatal("Degradations is empty, want predicted row-size degradations")
+	}
+	if result.Degradations[0].Reason != DegradationReasonPredictedRowSize {
+		t.Fatalf("first degradation reason = %q, want %q", result.Degradations[0].Reason, DegradationReasonPredictedRowSize)
+	}
+	if strings.Contains(result.SQL, "`ID` text") {
+		t.Fatalf("primary key ID must not be degraded:\n%s", result.SQL)
+	}
+}
+
+func TestConvertToMySQLResultKeepsIndexedColumnsInlineDuringAggressiveDegradation(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  999,
+		MaxNvarcharToTextColumns: 999,
+		MaxNvarcharToTextSize:    9999,
+		MaxVarcharToTextSize:     9999,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+		{Name: "indexed_code", Type: "nvarchar(100) NULL", Nullable: true},
+	}
+	for i := 0; i < 220; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName:  "wide_indexed",
+		Columns:    cols,
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_wide_indexed", Columns: []string{"ID"}},
+		Indexes: []parser.IndexDef{
+			{Name: "IDX_indexed_code", Columns: []string{"indexed_code"}},
+		},
+	}
+
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{})
+	if err != nil {
+		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
+	}
+	if strings.Contains(result.SQL, "`indexed_code` text") {
+		t.Fatalf("indexed_code must remain inline:\n%s", result.SQL)
+	}
+	if !strings.Contains(result.SQL, "CREATE INDEX `IDX_indexed_code` ON `wide_indexed` (`indexed_code`);") {
+		t.Fatalf("index on indexed_code should remain:\n%s", result.SQL)
+	}
+}
+
+func TestConvertToMySQLResultAggressiveError1118AllowsNumericFallbackAfterStrings(t *testing.T) {
+	tc := NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  999,
+		MaxNvarcharToTextColumns: 999,
+		MaxNvarcharToTextSize:    9999,
+		MaxVarcharToTextSize:     9999,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+		{Name: "name", Type: "nvarchar(100) NULL", Nullable: true},
+	}
+	for i := 0; i < 700; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("amount%04d", i),
+			Type:     "numeric(20,4) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName:  "wide_numeric",
+		Columns:    cols,
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_wide_numeric", Columns: []string{"ID"}},
+	}
+
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{
+		Mode:                    ConvertModeAggressive,
+		Reason:                  DegradationReasonError1118,
+		AllowNumericDegradation: true,
+	})
+	if err != nil {
+		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
+	}
+
+	var firstNumericIndex = -1
+	var firstStringIndex = -1
+	for i, d := range result.Degradations {
+		if d.ColumnName == "name" {
+			firstStringIndex = i
+		}
+		if strings.HasPrefix(d.ColumnName, "amount") && firstNumericIndex == -1 {
+			firstNumericIndex = i
+		}
+	}
+	if firstStringIndex == -1 {
+		t.Fatalf("string degradation for name not found: %+v", result.Degradations)
+	}
+	if firstNumericIndex == -1 {
+		t.Fatalf("numeric degradation not found: %+v", result.Degradations)
+	}
+	if firstNumericIndex < firstStringIndex {
+		t.Fatalf("numeric degradation happened before string degradation: %+v", result.Degradations)
+	}
+	if !strings.Contains(result.SQL, "`amount") || !strings.Contains(result.SQL, "` text NULL") {
+		t.Fatalf("expected numeric columns to be degraded to text:\n%s", result.SQL)
+	}
+}

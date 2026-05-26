@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/converter"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
@@ -446,28 +448,9 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 					continue
 				}
 
-				// 转换为 MySQL DDL
-				mysqlDDL, err := tableConverter.ConvertToMySQL(tableDDL)
-				if err != nil {
-					logger.Errorf("[Worker %d] Failed to convert DDL for table %s: %v", workerID, tableName, err)
-					tracker.FailTable(tableName, fmt.Sprintf("DDL conversion failed: %v", err))
-					tracker.FailPhaseItem()
-
-					mu.Lock()
-					failedTableNames = append(failedTableNames, tableName)
-					mu.Unlock()
-					totalFail.Add(1)
-
-					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-						migrationCtx.Stop(fmt.Errorf("DDL conversion failed for table %s: %w", tableName, err))
-						return
-					}
-					continue
-				}
-
 				// 执行 CREATE TABLE
 				logger.Infof("[Worker %d] Creating table: %s", workerID, tableName)
-				if err := conn.ExecuteDDL(mysqlDDL); err != nil {
+				if _, err := createTableDDLWithRetry(conn, tableConverter, tableDDL); err != nil {
 					logger.Errorf("[Worker %d] Failed to create table %s: %v", workerID, tableName, err)
 					tracker.FailTable(tableName, fmt.Sprintf("Table creation failed: %v", err))
 					tracker.FailPhaseItem()
@@ -534,6 +517,59 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	}
 
 	return nil
+}
+
+type ddlExecutor interface {
+	ExecuteDDL(string) error
+}
+
+func createTableDDLWithRetry(executor ddlExecutor, tableConverter *converter.TableConverter, tableDDL *parser.TableDDL) (converter.ConvertResult, error) {
+	result, err := tableConverter.ConvertToMySQLResult(tableDDL, converter.ConvertOptions{})
+	if err != nil {
+		return converter.ConvertResult{}, err
+	}
+	logColumnDegradations(result.Degradations)
+
+	if err := executor.ExecuteDDL(result.SQL); err == nil {
+		return result, nil
+	} else if !isMySQLRowSizeTooLarge(err) {
+		return result, err
+	} else {
+		firstErr := err
+		retryResult, retryErr := tableConverter.ConvertToMySQLResult(tableDDL, converter.ConvertOptions{
+			Mode:                    converter.ConvertModeAggressive,
+			Reason:                  converter.DegradationReasonError1118,
+			AllowNumericDegradation: true,
+		})
+		if retryErr != nil {
+			return result, fmt.Errorf("normal create failed with row size error: %w; aggressive conversion failed: %v", firstErr, retryErr)
+		}
+		logColumnDegradations(retryResult.Degradations)
+		if err := executor.ExecuteDDL(retryResult.SQL); err != nil {
+			return retryResult, fmt.Errorf("normal create failed with row size error: %w; aggressive retry failed: %v", firstErr, err)
+		}
+		return retryResult, nil
+	}
+}
+
+func isMySQLRowSizeTooLarge(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1118
+}
+
+func logColumnDegradations(degradations []converter.ColumnDegradation) {
+	for _, degradation := range degradations {
+		logger.Warnf(
+			"Wide table degradation: table=%s reason=%s column=%s source=%s target=%s estimated_before=%d estimated_after=%d",
+			degradation.TableName,
+			degradation.Reason,
+			degradation.ColumnName,
+			degradation.SourceType,
+			degradation.TargetType,
+			degradation.EstimatedBytesBefore,
+			degradation.EstimatedBytesAfter,
+		)
+	}
 }
 
 // importDataWithCSVMapping 导入数据（基于 CSV 文件映射）

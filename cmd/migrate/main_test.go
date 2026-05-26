@@ -2,9 +2,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/converter"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
@@ -33,6 +36,71 @@ func TestCSVNotFoundShouldAdvanceOverallSkip(t *testing.T) {
 	}
 	if !info.IsCompleted {
 		t.Fatal("IsCompleted = false, want true")
+	}
+}
+
+type fakeDDLExecutor struct {
+	errs []error
+	ddls []string
+}
+
+func (f *fakeDDLExecutor) ExecuteDDL(ddl string) error {
+	f.ddls = append(f.ddls, ddl)
+	if len(f.errs) == 0 {
+		return nil
+	}
+	err := f.errs[0]
+	f.errs = f.errs[1:]
+	return err
+}
+
+func TestCreateTableDDLWithRetryRetriesOnceOnMySQL1118(t *testing.T) {
+	tc := converter.NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  999,
+		MaxNvarcharToTextColumns: 999,
+		MaxNvarcharToTextSize:    9999,
+		MaxVarcharToTextSize:     9999,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+	}
+	for i := 0; i < 220; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName:  "retry_wide",
+		Columns:    cols,
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_retry_wide", Columns: []string{"ID"}},
+	}
+	executor := &fakeDDLExecutor{
+		errs: []error{
+			fmt.Errorf("failed to execute DDL: %w", &mysql.MySQLError{Number: 1118, Message: "Row size too large"}),
+			nil,
+		},
+	}
+
+	result, err := createTableDDLWithRetry(executor, tc, tableDDL)
+	if err != nil {
+		t.Fatalf("createTableDDLWithRetry returned error: %v", err)
+	}
+	if len(executor.ddls) != 2 {
+		t.Fatalf("ExecuteDDL calls = %d, want 2", len(executor.ddls))
+	}
+	if result.Mode != converter.ConvertModeAggressive {
+		t.Fatalf("Mode = %q, want %q", result.Mode, converter.ConvertModeAggressive)
+	}
+	if len(result.Degradations) == 0 {
+		t.Fatal("retry result should include degradation records")
+	}
+	for _, degradation := range result.Degradations {
+		if degradation.Reason != converter.DegradationReasonError1118 {
+			t.Fatalf("degradation reason = %q, want %q", degradation.Reason, converter.DegradationReasonError1118)
+		}
 	}
 }
 

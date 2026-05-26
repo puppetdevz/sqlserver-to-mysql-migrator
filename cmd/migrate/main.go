@@ -174,7 +174,6 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		logger.Infof("Filtered to %d specified tables", len(allTableNames))
 	}
 
-	// 过滤掉 skip_tables 中配置的表
 	if len(cfg.Migration.SkipTables) > 0 {
 		before := len(allTableNames)
 		allTableNames = excludeTables(allTableNames, cfg.Migration.SkipTables, tableMatcher)
@@ -265,7 +264,6 @@ func filterTables(allTables []string, specifiedTables []string, tableMatcher mat
 	return filtered
 }
 
-// excludeTables 从表列表中排除指定的表
 func excludeTables(allTables []string, excludeList []string, tableMatcher matcher.TableNameMatcher) []string {
 	excludeSet := tableMatcher.BuildSet(excludeList)
 

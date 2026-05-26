@@ -36,6 +36,8 @@ var (
 
 const (
 	Version = "1.0.0"
+
+	rowSizeFailedTablesFile = "row_size_failed_tables.txt"
 )
 
 func logImportDiagnostic(diag *importer.ImportDiagnostic) {
@@ -200,8 +202,16 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 			logger.Infof("[DRY RUN]   - %s", tableName)
 		}
 	} else if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
-		if err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher); err != nil {
+		rowSizeFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
+		if err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
+		}
+		if len(rowSizeFailed) > 0 {
+			if writeErr := writeRowSizeFailedTables(rowSizeFailed); writeErr != nil {
+				logger.Errorf("Failed to write row size failed tables file: %v", writeErr)
+			}
+			allTableNames = excludeTables(allTableNames, rowSizeFailed, tableMatcher)
+			logger.Warnf("Excluded %d row-size-too-large tables from subsequent phases: %v", len(rowSizeFailed), rowSizeFailed)
 		}
 	}
 
@@ -383,7 +393,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
-func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) error {
+func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) ([]string, error) {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
 	tracker.StartPhase("create-missing-tables", len(missingTables))
@@ -397,6 +407,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	var totalFail atomic.Int64
 	var mu sync.Mutex
 	var failedTableNames []string
+	var rowSizeFailedTables []string
 
 	var wg sync.WaitGroup
 
@@ -455,6 +466,9 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 
 					mu.Lock()
 					failedTableNames = append(failedTableNames, tableName)
+					if isMySQLRowSizeTooLarge(err) {
+						rowSizeFailedTables = append(rowSizeFailedTables, tableName)
+					}
 					mu.Unlock()
 					totalFail.Add(1)
 
@@ -495,7 +509,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 
 	// context 停止且有错误时返回
 	if err := migrationCtx.Err(); err != nil {
-		return err
+		return rowSizeFailedTables, err
 	}
 
 	successCount := int(totalSuccess.Load())
@@ -511,10 +525,10 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	}
 
 	if failCount > 0 {
-		return fmt.Errorf("%d tables failed to create", failCount)
+		return rowSizeFailedTables, fmt.Errorf("%d tables failed to create", failCount)
 	}
 
-	return nil
+	return rowSizeFailedTables, nil
 }
 
 type ddlExecutor interface {
@@ -553,6 +567,11 @@ func createTableDDLWithRetry(executor ddlExecutor, tableConverter *converter.Tab
 func isMySQLRowSizeTooLarge(err error) bool {
 	var mysqlErr *mysql.MySQLError
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1118
+}
+
+func writeRowSizeFailedTables(tables []string) error {
+	content := strings.Join(tables, ", ")
+	return os.WriteFile(rowSizeFailedTablesFile, []byte(content), 0644)
 }
 
 func logColumnDegradations(degradations []converter.ColumnDegradation) {

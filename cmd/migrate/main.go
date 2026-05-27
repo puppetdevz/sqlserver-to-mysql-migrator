@@ -634,7 +634,6 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 
 	// 创建数据导入器
 	dataImporter := importer.NewDataImporter(conn, cfg)
-	dataImporter.WithContext(migrationCtx.Context())
 	dataImporter.WithProgressCallback(func(tableName string, totalRows, processedRows, insertedRows int64) {
 		if totalRows > 0 {
 			if err := tracker.SetTableTotalRows(tableName, totalRows); err != nil {

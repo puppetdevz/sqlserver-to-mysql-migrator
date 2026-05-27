@@ -37,6 +37,7 @@ func NewConnectionWithMatcher(cfg *config.TargetConfig, tableMatcher matcher.Tab
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.GetConnMaxLifetime())
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	// 测试连接
 	if err := db.Ping(); err != nil {
@@ -46,6 +47,9 @@ func NewConnectionWithMatcher(cfg *config.TargetConfig, tableMatcher matcher.Tab
 
 	// 禁用 innodb_strict_mode 以支持超宽表（允许 ROW_FORMAT=COMPRESSED 下超出行大小限制的表）
 	db.Exec("SET SESSION innodb_strict_mode = OFF")
+	// 增加会话级网络超时，防止大批次插入时 MySQL 服务端断开连接
+	db.Exec("SET SESSION net_write_timeout = 600")
+	db.Exec("SET SESSION net_read_timeout = 600")
 
 	logger.Infof("Database connected: %s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
 

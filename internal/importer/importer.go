@@ -387,6 +387,11 @@ type batchResult struct {
 
 // pipelinedImport 流水线导入：边读边写
 func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, csvTotalRows int64) (*ImportResult, error, *ImportDiagnostic) {
+	safeCtx := ti.ctx
+	if safeCtx == nil {
+		safeCtx = context.Background()
+	}
+
 	reader := csv.NewReader(file)
 	reader.LazyQuotes = true
 	reader.TrimLeadingSpace = true
@@ -413,6 +418,16 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		headers, err = reader.Read()
 		if err != nil {
 			file.Close()
+			if err == io.EOF {
+				logger.Infof("Table %s: CSV file is empty, skipping import", ti.tableName)
+				return &ImportResult{
+					TableName:     ti.tableName,
+					Success:       true,
+					InsertedRows:  0,
+					ProcessedRows: 0,
+					ErrorCount:    0,
+				}, nil, nil
+			}
 			diag := &ImportDiagnostic{
 				TableName:   ti.tableName,
 				ErrorType:   ErrorTypeEOF,
@@ -522,7 +537,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		return nil, fmt.Errorf("no valid columns to insert for table %s", actualTableName), diag
 	}
 	inserter.SetMaxBatchBytes(ti.cfg.Migration.MaxBatchBytes)
-	inserter.SetContext(ti.ctx)
+	inserter.SetContext(safeCtx)
 	defer inserter.Close()
 
 	// 记录跳过的列
@@ -612,11 +627,11 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 
 			// 检查取消信号
 			select {
-			case <-ti.ctx.Done():
+			case <-safeCtx.Done():
 				csvDoneOnce.Do(func() { close(csvDone) })
 				// 发送取消错误到 batchChan，让 DB writer 感知
 				select {
-				case batchChan <- batchData{batchNum: batchNum, err: ti.ctx.Err()}:
+				case batchChan <- batchData{batchNum: batchNum, err: safeCtx.Err()}:
 				case <-csvDone:
 				}
 				return

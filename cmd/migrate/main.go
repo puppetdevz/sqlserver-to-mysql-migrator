@@ -38,6 +38,7 @@ const (
 	Version = "1.0.0"
 
 	rowSizeFailedTablesFile = "row_size_failed_tables.txt"
+	completedTablesFile     = "completed_tables.txt"
 )
 
 func logImportDiagnostic(diag *importer.ImportDiagnostic) {
@@ -572,6 +573,22 @@ func isMySQLRowSizeTooLarge(err error) bool {
 func writeRowSizeFailedTables(tables []string) error {
 	content := strings.Join(tables, ", ")
 	return os.WriteFile(rowSizeFailedTablesFile, []byte(content), 0644)
+}
+
+func loadCompletedTables() []string {
+	data, err := os.ReadFile(completedTablesFile)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	var tables []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			tables = append(tables, line)
+		}
+	}
+	return tables
 }
 
 func logColumnDegradations(degradations []converter.ColumnDegradation) {

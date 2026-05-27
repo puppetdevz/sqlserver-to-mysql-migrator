@@ -114,6 +114,12 @@ func main() {
 	logger.Infof("Version: %s", Version)
 	logger.Infof("Config: %s", *configPath)
 
+	config.LogEffective(cfg, config.CLIArgs{
+		Tables:     *tables,
+		CreateOnly: *createOnly,
+		DryRun:     *dryRun,
+	})
+
 	tableMatcher := matcher.NewTableNameMatcher(cfg.Migration.IsTableNameCaseSensitive())
 	logger.Infof("Table name case sensitive: %t", tableMatcher.CaseSensitive())
 

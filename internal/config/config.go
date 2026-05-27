@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"time"
+
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 )
 
 // Config 全局配置结构
@@ -139,4 +141,120 @@ func (m MigrationConfig) IsTableNameCaseSensitive() bool {
 		return true
 	}
 	return *m.TableNameCaseSensitive
+}
+
+// IsFastFail returns the effective fast_fail value.
+func (m MigrationConfig) IsFastFail() bool {
+	if m.FastFail == nil {
+		return true
+	}
+	return *m.FastFail
+}
+
+// IsCSVHasHeader returns the effective csv_has_header value.
+func (s SourceConfig) IsCSVHasHeader() bool {
+	if s.CSVHasHeader == nil {
+		return true
+	}
+	return *s.CSVHasHeader
+}
+
+// EffectiveMaxBatchBytes returns the effective max_batch_bytes value.
+// 0 → default 32MB, negative → no limit.
+func (m MigrationConfig) EffectiveMaxBatchBytes() string {
+	if m.MaxBatchBytes < 0 {
+		return "unlimited"
+	}
+	if m.MaxBatchBytes == 0 {
+		return "33554432 (default)"
+	}
+	return fmt.Sprintf("%d", m.MaxBatchBytes)
+}
+
+// CLIArgs holds CLI flag values for diagnostic logging.
+type CLIArgs struct {
+	Tables        string
+	CreateOnly    bool
+	DryRun        bool
+	RemovePostfix string
+}
+
+// LogEffective prints all effective configuration to the logger.
+func LogEffective(cfg *Config, cli CLIArgs) {
+	logger.Info("=== Effective Configuration ===")
+
+	logger.Info("[source]")
+	logger.Infof("  ddl_file: %s", cfg.Source.DDLFile)
+	logger.Infof("  csv_directory: %s", cfg.Source.CSVDirectory)
+	if cfg.Source.CSVTimestamp != "" {
+		logger.Infof("  csv_timestamp: %s", cfg.Source.CSVTimestamp)
+	}
+	logger.Infof("  csv_has_header: %t", cfg.Source.IsCSVHasHeader())
+
+	logger.Info("[target]")
+	logger.Infof("  host: %s", cfg.Target.Host)
+	logger.Infof("  port: %d", cfg.Target.Port)
+	logger.Infof("  database: %s", cfg.Target.Database)
+	logger.Infof("  user: %s", cfg.Target.User)
+	logger.Infof("  password: %s", maskPassword(cfg.Target.Password))
+	if cfg.Target.Charset != "" {
+		logger.Infof("  charset: %s", cfg.Target.Charset)
+	}
+	logger.Infof("  max_open_conns: %d", cfg.Target.MaxOpenConns)
+	logger.Infof("  max_idle_conns: %d", cfg.Target.MaxIdleConns)
+	logger.Infof("  conn_max_lifetime: %ds", cfg.Target.ConnMaxLifetime)
+	logger.Infof("  write_timeout: %ds", cfg.Target.EffectiveWriteTimeout())
+	logger.Infof("  read_timeout: %ds", cfg.Target.EffectiveReadTimeout())
+
+	logger.Info("[migration]")
+	logger.Infof("  fast_fail: %t", cfg.Migration.IsFastFail())
+	logger.Infof("  table_name_case_sensitive: %t", cfg.Migration.IsTableNameCaseSensitive())
+	logger.Infof("  batch_size: %d", cfg.Migration.BatchSize)
+	logger.Infof("  max_workers: %d", cfg.Migration.MaxWorkers)
+	logger.Infof("  on_duplicate: %s", cfg.Migration.OnDuplicate)
+	logger.Infof("  max_rows_per_table: %d", cfg.Migration.MaxRowsPerTable)
+	if len(cfg.Migration.SkipTables) > 0 {
+		logger.Infof("  skip_tables: %v", cfg.Migration.SkipTables)
+	} else {
+		logger.Info("  skip_tables: (none)")
+	}
+	logger.Infof("  max_batch_bytes: %s", cfg.Migration.EffectiveMaxBatchBytes())
+
+	logger.Info("[logging]")
+	logger.Infof("  level: %s", cfg.Logging.Level)
+	logger.Infof("  file: %s", cfg.Logging.File)
+	logger.Infof("  console: %t", cfg.Logging.Console)
+	logger.Infof("  max_size: %d", cfg.Logging.MaxSize)
+	logger.Infof("  max_backups: %d", cfg.Logging.MaxBackups)
+	logger.Infof("  max_age: %d", cfg.Logging.MaxAge)
+
+	logger.Info("[converter]")
+	logger.Infof("  max_varchar_to_text_columns: %d", cfg.Converter.IsEffectiveMaxVarcharToTextColumns())
+	logger.Infof("  max_nvarchar_to_text_columns: %d", cfg.Converter.IsEffectiveMaxNvarcharToTextColumns())
+	logger.Infof("  max_varchar_to_text_size: %d", cfg.Converter.IsEffectiveMaxVarcharToTextSize())
+	logger.Infof("  max_nvarchar_to_text_size: %d", cfg.Converter.IsEffectiveMaxNvarcharToTextSize())
+
+	logger.Info("[cli]")
+	if cli.Tables != "" {
+		logger.Infof("  tables: %s", cli.Tables)
+	} else {
+		logger.Info("  tables: (all)")
+	}
+	logger.Infof("  create_tables_only: %t", cli.CreateOnly)
+	logger.Infof("  dry_run: %t", cli.DryRun)
+	if cli.RemovePostfix != "" {
+		logger.Infof("  remove_postfix: %s", cli.RemovePostfix)
+	}
+
+	logger.Info("===============================")
+}
+
+func maskPassword(pwd string) string {
+	if pwd == "" {
+		return "(empty)"
+	}
+	if len(pwd) <= 2 {
+		return "***"
+	}
+	return pwd[:2] + "***"
 }

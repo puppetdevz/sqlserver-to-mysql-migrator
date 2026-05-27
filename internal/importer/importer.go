@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	maxRetries   = 3
-	retryDelayMs = 100
-	bufferSize   = 10       // 流水线缓冲区大小
-	bom          = "\uFEFF" // UTF-8 BOM 字符
+	maxRetries               = 3
+	retryDelay               = 100 * time.Millisecond
+	maxConnectionRetries     = 8
+	connectionRetryBaseDelay = 1 * time.Second
+	maxConnectionRetryDelay  = 30 * time.Second
+	bufferSize               = 10       // 流水线缓冲区大小
+	bom                      = "\uFEFF" // UTF-8 BOM 字符
 )
 
 // TableImporter 表数据导入器
@@ -377,6 +380,24 @@ type batchResult struct {
 	err          error // nil=成功，非nil=错误
 }
 
+func batchRetryPolicy(err error) (int, time.Duration) {
+	if isRetryableConnectionError(err) {
+		return maxConnectionRetries, connectionRetryBaseDelay
+	}
+	return maxRetries, retryDelay
+}
+
+func batchRetryDelay(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
+	delay := baseDelay
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay >= maxDelay {
+			return maxDelay
+		}
+	}
+	return delay
+}
+
 // pipelinedImport 流水线导入：边读边写
 func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, csvTotalRows int64) (*ImportResult, error, *ImportDiagnostic) {
 	safeCtx := ti.ctx
@@ -712,13 +733,27 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			// 重试机制
 			var affected int64
 			var insertErr error
-			for retry := 0; retry < maxRetries; retry++ {
+			var attempts int
+		retryLoop:
+			for retry := 0; ; retry++ {
 				affected, insertErr = inserter.InsertBatch(bd.rows)
 				if insertErr == nil {
 					break
 				}
-				logger.Warnf("Retry %d/%d for batch %d in table %s: %v", retry+1, maxRetries, bd.batchNum, ti.tableName, insertErr)
-				time.Sleep(time.Duration(retry+1) * retryDelayMs * time.Millisecond)
+				var baseDelay time.Duration
+				attempts, baseDelay = batchRetryPolicy(insertErr)
+				if retry+1 >= attempts {
+					break
+				}
+				delay := batchRetryDelay(retry+1, baseDelay, maxConnectionRetryDelay)
+				logger.Warnf("Retry %d/%d for batch %d in table %s after %s: %v",
+					retry+1, attempts, bd.batchNum, ti.tableName, delay, insertErr)
+				select {
+				case <-time.After(delay):
+				case <-safeCtx.Done():
+					insertErr = safeCtx.Err()
+					break retryLoop
+				}
 			}
 
 			// 发送结果到 resultChan
@@ -731,7 +766,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 
 			if insertErr != nil {
 				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
-				logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, maxRetries, insertErr)
+				logger.Errorf("Failed to insert batch %d for table %s after %d attempts: %v", bd.batchNum, ti.tableName, attempts, insertErr)
 				if fastFail {
 					csvDoneOnce.Do(func() { close(csvDone) })
 				}

@@ -107,9 +107,11 @@ func (t *TargetConfig) GetDSN() string {
 		t.User, t.Password, t.Host, t.Port, t.Database, t.Charset)
 	if t.EffectiveWriteTimeout() > 0 {
 		dsn += fmt.Sprintf("&writeTimeout=%ds", t.EffectiveWriteTimeout())
+		dsn += fmt.Sprintf("&net_write_timeout=%d", t.EffectiveNetWriteTimeout())
 	}
 	if t.EffectiveReadTimeout() > 0 {
 		dsn += fmt.Sprintf("&readTimeout=%ds", t.EffectiveReadTimeout())
+		dsn += fmt.Sprintf("&net_read_timeout=%d", t.EffectiveNetReadTimeout())
 	}
 	return dsn
 }
@@ -128,6 +130,27 @@ func (t *TargetConfig) EffectiveReadTimeout() int {
 		return 30
 	}
 	return t.ReadTimeout
+}
+
+// minNetTimeoutSeconds is the floor for session-level net_write_timeout/net_read_timeout.
+// MySQL pooled connections need a long enough session timeout to survive idle periods between batches.
+const minNetTimeoutSeconds = 600
+
+// EffectiveNetWriteTimeout returns the session net_write_timeout for every pooled MySQL connection.
+func (t *TargetConfig) EffectiveNetWriteTimeout() int {
+	return effectiveNetTimeout(t.EffectiveWriteTimeout())
+}
+
+// EffectiveNetReadTimeout returns the session net_read_timeout for every pooled MySQL connection.
+func (t *TargetConfig) EffectiveNetReadTimeout() int {
+	return effectiveNetTimeout(t.EffectiveReadTimeout())
+}
+
+func effectiveNetTimeout(base int) int {
+	if base < minNetTimeoutSeconds {
+		return minNetTimeoutSeconds
+	}
+	return base
 }
 
 // GetConnMaxLifetime 获取连接最大生命周期
@@ -205,6 +228,8 @@ func LogEffective(cfg *Config, cli CLIArgs) {
 	logger.Infof("  conn_max_lifetime: %ds", cfg.Target.ConnMaxLifetime)
 	logger.Infof("  write_timeout: %ds", cfg.Target.EffectiveWriteTimeout())
 	logger.Infof("  read_timeout: %ds", cfg.Target.EffectiveReadTimeout())
+	logger.Infof("  net_write_timeout: %ds", cfg.Target.EffectiveNetWriteTimeout())
+	logger.Infof("  net_read_timeout: %ds", cfg.Target.EffectiveNetReadTimeout())
 
 	logger.Info("[migration]")
 	logger.Infof("  fast_fail: %t", cfg.Migration.IsFastFail())

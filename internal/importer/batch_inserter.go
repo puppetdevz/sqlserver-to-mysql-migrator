@@ -3,10 +3,14 @@ package importer
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // maxPreparedPlaceholders MySQL prepared statement 占位符上限（留有余量）
@@ -167,6 +171,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 		bi.stmtMu.Unlock()
 		stmt, err := bi.db.PrepareContext(bi.ctx, query)
 		if err != nil {
+			bi.resetOnConnErr(err)
 			return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 		}
 
@@ -180,6 +185,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 	// 不使用缓存，每次重新 Prepare
 	stmt, err := bi.db.PrepareContext(bi.ctx, query)
 	if err != nil {
+		bi.resetOnConnErr(err)
 		return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 	}
 	bi.stmtMu.Lock()
@@ -375,6 +381,7 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 
 	result, err := stmt.ExecContext(bi.ctx, args...)
 	if err != nil {
+		bi.resetOnConnErr(err)
 		return 0, fmt.Errorf("failed to execute batch insert: %w", err)
 	}
 
@@ -389,6 +396,17 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 		bi.stmtMu.Unlock()
 	}
 	return rowsAffected, nil
+}
+
+func isRetryableConnectionError(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) &&
+		(errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, driver.ErrBadConn))
+}
+
+func (bi *BatchInserter) resetOnConnErr(err error) {
+	if isRetryableConnectionError(err) {
+		bi.resetStmt()
+	}
 }
 
 // buildInsertQuery 构建批量插入 SQL 语句（线程安全）

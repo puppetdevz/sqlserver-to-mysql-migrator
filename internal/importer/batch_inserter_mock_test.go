@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 )
 
 func newMockDB(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
@@ -748,6 +749,53 @@ func TestInsertBatchCachedReuse(t *testing.T) {
 	_, err = bi.InsertBatch([][]interface{}{{3, "C"}, {4, "D"}})
 	if err != nil {
 		t.Fatalf("second InsertBatch: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestInsertBatchConnectionErrorResetsCachedStatement(t *testing.T) {
+	db, mock := newMockDB(t)
+	bi := NewBatchInserter(db, "users", []string{"id", "name"}, 100, "ignore")
+	query := bi.buildInsertQuery(2)
+
+	firstPrep := mock.ExpectPrepare(query)
+	firstPrep.ExpectExec().
+		WithArgs(1, "A", 2, "B").
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	if _, err := bi.InsertBatch([][]interface{}{{1, "A"}, {2, "B"}}); err != nil {
+		t.Fatalf("first InsertBatch: %v", err)
+	}
+
+	firstPrep.ExpectExec().
+		WithArgs(3, "C", 4, "D").
+		WillReturnError(mysql.ErrInvalidConn)
+
+	if _, err := bi.InsertBatch([][]interface{}{{3, "C"}, {4, "D"}}); err == nil {
+		t.Fatal("second InsertBatch should return connection error")
+	}
+
+	bi.stmtMu.RLock()
+	stmt := bi.stmt
+	cachedRows := bi.cachedRows
+	bi.stmtMu.RUnlock()
+	if stmt != nil {
+		t.Fatal("cached stmt should be reset after connection error")
+	}
+	if cachedRows != 0 {
+		t.Fatalf("cachedRows = %d, want 0", cachedRows)
+	}
+
+	secondPrep := mock.ExpectPrepare(query)
+	secondPrep.ExpectExec().
+		WithArgs(3, "C", 4, "D").
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	if _, err := bi.InsertBatch([][]interface{}{{3, "C"}, {4, "D"}}); err != nil {
+		t.Fatalf("retry InsertBatch should prepare a new stmt: %v", err)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

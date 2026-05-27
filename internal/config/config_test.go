@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,32 @@ logging:
 
 	if !cfg.Migration.IsTableNameCaseSensitive() {
 		t.Fatal("IsTableNameCaseSensitive() = false, want true when omitted")
+	}
+}
+
+func TestGetDSNInitializesNetworkTimeoutsPerConnection(t *testing.T) {
+	cfg := TargetConfig{
+		Host:         "127.0.0.1",
+		Port:         3306,
+		Database:     "migration_example",
+		User:         "root",
+		Password:     "pass",
+		Charset:      "utf8mb4",
+		WriteTimeout: 600,
+		ReadTimeout:  700,
+	}
+
+	dsn := cfg.GetDSN()
+
+	for _, want := range []string{
+		"writeTimeout=600s",
+		"readTimeout=700s",
+		"net_write_timeout=600",
+		"net_read_timeout=700",
+	} {
+		if !strings.Contains(dsn, want) {
+			t.Fatalf("GetDSN() = %q, want it to contain %q", dsn, want)
+		}
 	}
 }
 

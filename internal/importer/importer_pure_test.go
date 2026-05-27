@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -790,5 +791,35 @@ func TestBatchInserterDefaultContextIsBackground(t *testing.T) {
 	}
 	if insertResult != 0 {
 		t.Fatalf("expected 0, got %d", insertResult)
+	}
+}
+
+func TestBatchRetryPolicyUsesLongerBackoffForConnectionErrors(t *testing.T) {
+	attempts, baseDelay := batchRetryPolicy(fmt.Errorf("wrapped: %w", driver.ErrBadConn))
+
+	if attempts != maxConnectionRetries {
+		t.Fatalf("attempts = %d, want %d", attempts, maxConnectionRetries)
+	}
+	if baseDelay != connectionRetryBaseDelay {
+		t.Fatalf("baseDelay = %s, want %s", baseDelay, connectionRetryBaseDelay)
+	}
+}
+
+func TestBatchRetryPolicyKeepsDefaultForDataErrors(t *testing.T) {
+	attempts, baseDelay := batchRetryPolicy(fmt.Errorf("data too long for column"))
+
+	if attempts != maxRetries {
+		t.Fatalf("attempts = %d, want %d", attempts, maxRetries)
+	}
+	if baseDelay != retryDelay {
+		t.Fatalf("baseDelay = %s, want %s", baseDelay, retryDelay)
+	}
+}
+
+func TestBatchRetryDelayCapsExponentialBackoff(t *testing.T) {
+	delay := batchRetryDelay(10, time.Second, 5*time.Second)
+
+	if delay != 5*time.Second {
+		t.Fatalf("delay = %s, want 5s", delay)
 	}
 }

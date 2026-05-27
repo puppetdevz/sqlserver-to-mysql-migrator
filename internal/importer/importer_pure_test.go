@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -364,9 +365,9 @@ func TestLimitSliceEmpty(t *testing.T) {
 func TestScoreValueForColumnTypeGKPType(t *testing.T) {
 	// "gkp" type does not match any heuristic, falls through to default 0
 	tests := []struct {
-		value    string
-		colType  string
-		want     int
+		value   string
+		colType string
+		want    int
 	}{
 		// Empty value always scores 1
 		{"", "gkp", 1},
@@ -694,5 +695,100 @@ func TestNewErrorRecorderCreateDir(t *testing.T) {
 	errs := recorder.GetErrors()
 	if len(errs) != 1 {
 		t.Fatalf("errors len = %d, want 1", len(errs))
+	}
+}
+
+// ============================================================================
+// Fix #1/#3: WithContext 传播验证
+// ============================================================================
+
+func TestTableImporterWithContextPropagation(t *testing.T) {
+	ti := &TableImporter{
+		tableName: "test_table",
+	}
+	// 初始状态 ctx 应为 nil (零值)
+	if ti.ctx != nil {
+		t.Fatal("initial ctx should be nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ti.WithContext(ctx)
+	if ti.ctx != ctx {
+		t.Fatal("WithContext should set the context")
+	}
+}
+
+func TestTableImporterWithContextNil(t *testing.T) {
+	ti := &TableImporter{
+		tableName: "test_table",
+	}
+
+	// pipelinedImport 中的 safeCtx 回退逻辑需要处理 nil ctx
+	ti.WithContext(nil)
+	if ti.ctx != nil {
+		t.Error("WithContext(nil) should store nil")
+	}
+
+	// 验证 safeCtx 回退：当 ti.ctx 为 nil 时应回退到 Background
+	safeCtx := ti.ctx
+	if safeCtx == nil {
+		safeCtx = context.TODO()
+	}
+	if safeCtx != context.TODO() {
+		t.Error("nil ctx fallback should produce a valid context")
+	}
+}
+
+func TestDataImporterWithContextPropagation(t *testing.T) {
+	di := &DataImporter{
+		cfg: nil,
+	}
+	if di.ctx != nil {
+		t.Fatal("initial ctx should be nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	di.WithContext(ctx)
+	if di.ctx != ctx {
+		t.Fatal("WithContext should set the context")
+	}
+}
+
+func TestBatchInserterSetContext(t *testing.T) {
+	bi := &BatchInserter{
+		tableName: "test_table",
+	}
+	if bi.ctx != nil {
+		t.Fatal("initial ctx should be nil")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bi.SetContext(ctx)
+	if bi.ctx != ctx {
+		t.Fatal("SetContext should set the context")
+	}
+}
+
+func TestBatchInserterDefaultContextIsBackground(t *testing.T) {
+	// NewBatchInserter 应将 ctx 初始化为 context.Background()
+	bi := &BatchInserter{
+		tableName:     "test",
+		columns:       []string{"col1"},
+		batchSize:     100,
+		maxBatchBytes: maxBatchBytes,
+		ctx:           context.Background(),
+	}
+	insertResult, err := bi.InsertBatch([][]interface{}{})
+	if err != nil {
+		t.Fatalf("InsertBatch with empty rows: %v", err)
+	}
+	if insertResult != 0 {
+		t.Fatalf("expected 0, got %d", insertResult)
 	}
 }

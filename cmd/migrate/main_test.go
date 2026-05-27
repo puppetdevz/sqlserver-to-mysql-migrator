@@ -3,11 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/converter"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
@@ -330,5 +332,159 @@ func TestImportDataWithCSVMappingReturnsContextErrorBeforeDispatch(t *testing.T)
 	err = importDataWithCSVMapping(cfg, nil, nil, []string{"ADDRESSBOOK"}, tracker, migrationCtx, matcher.NewTableNameMatcher(true))
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("importDataWithCSVMapping() error = %v, want %v", err, wantErr)
+	}
+}
+
+// ============================================================================
+// Fix #8: createTableDDLWithRetry 错误包装使用 %w 使 errors.Is 能遍历整个链
+// ============================================================================
+
+func TestCreateTableDDLWithRetryDoubleWErrorWrapping(t *testing.T) {
+	tc := converter.NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  999,
+		MaxNvarcharToTextColumns: 999,
+		MaxNvarcharToTextSize:    9999,
+		MaxVarcharToTextSize:     9999,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+	}
+	for i := 0; i < 220; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName:  "retry_wide",
+		Columns:    cols,
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_retry_wide", Columns: []string{"ID"}},
+	}
+
+	rowSizeErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large"}
+	aggressiveErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large (after aggressive)"}
+
+	// 两次都失败：第一次 Error 1118 触发重试，第二次（aggressive）也失败
+	executor := &fakeDDLExecutor{
+		errs: []error{
+			fmt.Errorf("wrapped: %w", rowSizeErr),
+			fmt.Errorf("aggressive also failed: %w", aggressiveErr),
+		},
+	}
+
+	_, err := createTableDDLWithRetry(executor, tc, tableDDL)
+	if err == nil {
+		t.Fatal("expected error from createTableDDLWithRetry")
+	}
+
+	// errors.Is 应该能遍历到 rowSizeErr（通过第一个 %w 包装）
+	if !errors.Is(err, rowSizeErr) {
+		t.Fatalf("errors.Is(err, rowSizeErr) = false, double %%w wrapping should preserve error chain. err = %v", err)
+	}
+
+	// errors.Is 也应该能遍历到 aggressiveErr（通过第二个 %w 包装）
+	if !errors.Is(err, aggressiveErr) {
+		t.Fatalf("errors.Is(err, aggressiveErr) = false, double %%w wrapping should preserve retry error. err = %v", err)
+	}
+
+	// 包装错误应同时包含两个错误的信息
+	errStr := err.Error()
+	if !strings.Contains(errStr, "row size error") {
+		t.Error("error should mention row size error")
+	}
+	if !strings.Contains(errStr, "aggressive") {
+		t.Error("error should mention aggressive retry failure")
+	}
+}
+
+func TestCreateTableDDLWithRetryAggressiveRetryErrorWrapping(t *testing.T) {
+	tc := converter.NewTableConverter(config.ConverterConfig{
+		MaxVarcharToTextColumns:  999,
+		MaxNvarcharToTextColumns: 999,
+		MaxNvarcharToTextSize:    9999,
+		MaxVarcharToTextSize:     9999,
+	})
+
+	cols := []parser.ColumnDef{
+		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
+	}
+	for i := 0; i < 220; i++ {
+		cols = append(cols, parser.ColumnDef{
+			Name:     fmt.Sprintf("field%04d", i),
+			Type:     "nvarchar(100) NULL",
+			Nullable: true,
+		})
+	}
+	tableDDL := &parser.TableDDL{
+		TableName:  "retry_wide2",
+		Columns:    cols,
+		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_retry_wide2", Columns: []string{"ID"}},
+	}
+
+	rowSizeErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large"}
+	aggressiveFailErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large (after aggressive)"}
+
+	executor := &fakeDDLExecutor{
+		errs: []error{
+			fmt.Errorf("wrapped: %w", rowSizeErr),
+			fmt.Errorf("aggressive also failed: %w", aggressiveFailErr),
+		},
+	}
+
+	_, err := createTableDDLWithRetry(executor, tc, tableDDL)
+	if err == nil {
+		t.Fatal("expected error from createTableDDLWithRetry")
+	}
+
+	// errors.Is 应该能遍历到 rowSizeErr
+	if !errors.Is(err, rowSizeErr) {
+		t.Fatalf("errors.Is(err, rowSizeErr) = false, double %%w should preserve first error. err = %v", err)
+	}
+
+	// errors.Is 也应该能遍历到 aggressiveFailErr
+	if !errors.Is(err, aggressiveFailErr) {
+		t.Fatalf("errors.Is(err, aggressiveFailErr) = false, double %%w should preserve retry error. err = %v", err)
+	}
+}
+
+// ============================================================================
+// Fix #5: excludeTables 配合 createAndTrackTables 新返回值使用
+// ============================================================================
+
+func TestExcludeTablesRemovesAllFailedTables(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+
+	allTables := []string{"TABLE_A", "TABLE_B", "TABLE_C", "TABLE_D"}
+	failedTables := []string{"TABLE_A", "TABLE_C"} // A 和 C 建表失败
+
+	kept := excludeTables(allTables, failedTables, tableMatcher)
+
+	if len(kept) != 2 {
+		t.Fatalf("kept = %d, want 2", len(kept))
+	}
+	if kept[0] != "TABLE_B" || kept[1] != "TABLE_D" {
+		t.Fatalf("kept = %v, want [TABLE_B TABLE_D]", kept)
+	}
+}
+
+func TestExcludeTablesEmptyFailedList(t *testing.T) {
+	tableMatcher := matcher.NewTableNameMatcher(false)
+	allTables := []string{"A", "B", "C"}
+
+	kept := excludeTables(allTables, nil, tableMatcher)
+	if len(kept) != 3 {
+		t.Fatalf("kept = %d, want 3", len(kept))
+	}
+}
+
+func TestCreateAndTrackTablesReturnsThreeValues(t *testing.T) {
+	// 编译时验证：createAndTrackTables 现在返回 ([]string, []string, error)
+	// 此测试确保 3 返回值签名在重构中不被意外破坏
+	var _ = func(cfg *config.Config, conn *database.Connection, missing []string,
+		ddl map[string]*parser.TableDDL, tracker *progress.Tracker,
+		mCtx *migration.MigrationContext, m matcher.TableNameMatcher) ([]string, []string, error) {
+		return createAndTrackTables(cfg, conn, missing, ddl, tracker, mCtx, m)
 	}
 }

@@ -142,17 +142,17 @@ func countCSVRows(f *os.File) (int64, error) {
 
 // getDBColumns 获取数据库中表的列
 func (ti *TableImporter) getDBColumns(tableName string) ([]string, error) {
-	infos, err := ti.getDBColumnInfos(tableName)
+	infos, err := ti.getDBColumnInfos(context.Background(), tableName)
 	if err != nil {
 		return nil, err
 	}
 	return columnNamesFromInfos(infos), nil
 }
 
-func (ti *TableImporter) getDBColumnInfos(tableName string) ([]dbColumnInfo, error) {
+func (ti *TableImporter) getDBColumnInfos(ctx context.Context, tableName string) ([]dbColumnInfo, error) {
 	// 使用 DESCRIBE 获取列信息
 	query := fmt.Sprintf("DESCRIBE `%s`", tableName)
-	rows, err := ti.conn.DB.Query(query)
+	rows, err := ti.conn.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +398,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	reader.FieldsPerRecord = -1
 
 	// 获取数据库列（提前获取，用于无表头模式校验）
-	dbColumnInfos, dbErr := ti.getDBColumnInfos(actualTableName)
+	dbColumnInfos, dbErr := ti.getDBColumnInfos(safeCtx, actualTableName)
 	var dbColumns []string
 	if dbErr != nil {
 		logger.Warnf("Failed to get DB columns for %s: %v", actualTableName, dbErr)
@@ -628,11 +628,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			// 检查取消信号
 			select {
 			case <-safeCtx.Done():
-				csvDoneOnce.Do(func() { close(csvDone) })
-				// 发送取消错误到 batchChan，让 DB writer 感知
+				// 非阻塞发送取消错误到 batchChan，让 DB writer 感知
 				select {
 				case batchChan <- batchData{batchNum: batchNum, err: safeCtx.Err()}:
-				case <-csvDone:
+				default:
 				}
 				return
 			default:
@@ -652,11 +651,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 					}
 					if err != nil {
 						logger.Errorf("CSV read error in %s at line %d: %v", ti.tableName, lineNum, err)
-						csvDoneOnce.Do(func() { close(csvDone) })
-						// 发送错误 batch 到 batchChan，让 DB writer 知道
+						// 非阻塞发送错误到 batchChan，让 DB writer 感知
 						select {
 						case batchChan <- batchData{batchNum: batchNum, err: err}:
-						case <-csvDone:
+						default:
 						}
 						return
 					}

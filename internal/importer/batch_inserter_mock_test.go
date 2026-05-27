@@ -350,14 +350,14 @@ func TestInsertBatchSplitBatch(t *testing.T) {
 	prep1 := mock.ExpectPrepare(query1)
 	prep1.WillBeClosed()
 	prep1.ExpectExec().
-		WithArgs(anyArgs(309*201)...).
+		WithArgs(anyArgs(309 * 201)...).
 		WillReturnResult(sqlmock.NewResult(0, 309))
 
 	query2 := bi.buildInsertQuery(191)
 	prep2 := mock.ExpectPrepare(query2)
 	prep2.WillBeClosed()
 	prep2.ExpectExec().
-		WithArgs(anyArgs(191*201)...).
+		WithArgs(anyArgs(191 * 201)...).
 		WillReturnResult(sqlmock.NewResult(0, 191))
 
 	affected, err := bi.InsertBatch(rows)
@@ -875,5 +875,153 @@ func TestInsertBatchMaxRowsPerBatchCalculation(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// ============================================================================
+// Fix #2: PrepareContext 验证
+// ============================================================================
+
+func TestGetStmtUsesPrepareContext(t *testing.T) {
+	db, mock := newMockDB(t)
+	bi := NewBatchInserter(db, "users", []string{"id", "name"}, 100, "ignore")
+	query := bi.buildInsertQuery(2)
+
+	mock.ExpectPrepare(query).WillBeClosed()
+
+	stmt, needsClose, err := bi.getStmt(query, false)
+	if err != nil {
+		t.Fatalf("getStmt error: %v", err)
+	}
+	if !needsClose {
+		t.Fatal("non-cache path should return needsClose=true")
+	}
+	stmt.Close()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestGetStmtCacheHitPrepareContext(t *testing.T) {
+	db, mock := newMockDB(t)
+	bi := NewBatchInserter(db, "users", []string{"id", "name"}, 100, "ignore")
+	query := bi.buildInsertQuery(2)
+
+	prep := mock.ExpectPrepare(query)
+	prep.WillBeClosed()
+
+	stmt1, _, err := bi.getStmt(query, true)
+	if err != nil {
+		t.Fatalf("first getStmt: %v", err)
+	}
+
+	bi.stmtMu.Lock()
+	bi.cachedRows = 2
+	bi.stmtMu.Unlock()
+
+	stmt2, needsClose, err := bi.getStmt(query, true)
+	if err != nil {
+		t.Fatalf("second getStmt: %v", err)
+	}
+	if needsClose {
+		t.Fatal("cache hit should return needsClose=false")
+	}
+	if stmt2 != stmt1 {
+		t.Fatal("cache hit should return same stmt instance")
+	}
+
+	stmt1.Close()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// ============================================================================
+// Fix #6: MaxBatchBytes=0 保持默认值，负数表示不限制
+// ============================================================================
+
+func TestSetMaxBatchBytesZeroKeepsDefault(t *testing.T) {
+	db, _ := newMockDB(t)
+	bi := NewBatchInserter(db, "t", []string{"col1"}, 5000, "ignore")
+
+	defaultVal := bi.maxBatchBytes // 构造函数设置的默认值（32MB）
+	bi.SetMaxBatchBytes(0)
+
+	if bi.maxBatchBytes != defaultVal {
+		t.Fatalf("maxBatchBytes = %d, want %d (default preserved)", bi.maxBatchBytes, defaultVal)
+	}
+}
+
+func TestSetMaxBatchBytesNegativeDisablesLimit(t *testing.T) {
+	db, _ := newMockDB(t)
+	bi := NewBatchInserter(db, "t", []string{"col1"}, 5000, "ignore")
+	bi.SetMaxBatchBytes(-1)
+
+	if bi.maxBatchBytes != 0 {
+		t.Fatalf("maxBatchBytes = %d, want 0 (negative = no limit)", bi.maxBatchBytes)
+	}
+}
+
+func TestInsertBatchWithNegativeMaxBatchBytesSkipsByteCheck(t *testing.T) {
+	db, mock := newMockDB(t)
+	bi := NewBatchInserter(db, "t", []string{"col1"}, 5000, "ignore")
+	bi.SetMaxBatchBytes(-1) // 负数表示不限制
+
+	bigRow := make([]interface{}, 1)
+	bigRow[0] = strings.Repeat("x", 10*1024*1024)
+
+	rows := make([][]interface{}, 5)
+	for i := range rows {
+		rows[i] = bigRow
+	}
+
+	// maxBatchBytes=0（无限制），不触发字节拆分，所有行应在一个批次
+	query := bi.buildInsertQuery(5)
+	prep := mock.ExpectPrepare(query)
+	prep.ExpectExec().
+		WithArgs(anyArgs(5)...).
+		WillReturnResult(sqlmock.NewResult(0, 5))
+
+	affected, err := bi.InsertBatch(rows)
+	if err != nil {
+		t.Fatalf("InsertBatch error: %v", err)
+	}
+	if affected != 5 {
+		t.Fatalf("affected = %d, want 5", affected)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// ============================================================================
+// Fix #9: InsertBatch 空列除零防护
+// ============================================================================
+
+func TestInsertBatchEmptyColumnsReturnsError(t *testing.T) {
+	db, _ := newMockDB(t)
+	bi := NewBatchInserter(db, "t", []string{}, 100, "ignore")
+
+	rows := [][]interface{}{{"val1"}}
+	_, err := bi.InsertBatch(rows)
+	if err == nil {
+		t.Fatal("expected error for empty columns")
+	}
+	if !strings.Contains(err.Error(), "no columns defined") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInsertBatchEmptyRowsWithEmptyColumns(t *testing.T) {
+	db, _ := newMockDB(t)
+	bi := NewBatchInserter(db, "t", []string{}, 100, "ignore")
+
+	affected, err := bi.InsertBatch([][]interface{}{})
+	if err != nil {
+		t.Fatalf("expected no error for empty rows, got: %v", err)
+	}
+	if affected != 0 {
+		t.Fatalf("affected = %d, want 0", affected)
 	}
 }

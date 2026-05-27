@@ -46,10 +46,16 @@ func NewConnectionWithMatcher(cfg *config.TargetConfig, tableMatcher matcher.Tab
 	}
 
 	// 禁用 innodb_strict_mode 以支持超宽表（允许 ROW_FORMAT=COMPRESSED 下超出行大小限制的表）
-	db.Exec("SET SESSION innodb_strict_mode = OFF")
+	if _, err := db.Exec("SET SESSION innodb_strict_mode = OFF"); err != nil {
+		logger.Warnf("Failed to set innodb_strict_mode=OFF: %v", err)
+	}
 	// 增加会话级网络超时，防止大批次插入时 MySQL 服务端断开连接
-	db.Exec("SET SESSION net_write_timeout = 600")
-	db.Exec("SET SESSION net_read_timeout = 600")
+	if _, err := db.Exec("SET SESSION net_write_timeout = 600"); err != nil {
+		logger.Warnf("Failed to set net_write_timeout=600: %v", err)
+	}
+	if _, err := db.Exec("SET SESSION net_read_timeout = 600"); err != nil {
+		logger.Warnf("Failed to set net_read_timeout=600: %v", err)
+	}
 
 	logger.Infof("Database connected: %s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
 

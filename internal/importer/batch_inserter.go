@@ -37,10 +37,10 @@ func (e *errorColumnExtractor) extract(err error) (string, bool) {
 }
 
 var (
-	_dataTooLongExtractor    = &errorColumnExtractor{pattern: reDataTooLongColumn}
+	_dataTooLongExtractor       = &errorColumnExtractor{pattern: reDataTooLongColumn}
 	_incorrectTemporalExtractor = &errorColumnExtractor{pattern: reIncorrectTemporalColumn}
-	_incorrectNumericExtractor = &errorColumnExtractor{pattern: reIncorrectNumericColumn}
-	_outOfRangeExtractor      = &errorColumnExtractor{pattern: reOutOfRangeColumn}
+	_incorrectNumericExtractor  = &errorColumnExtractor{pattern: reIncorrectNumericColumn}
+	_outOfRangeExtractor        = &errorColumnExtractor{pattern: reOutOfRangeColumn}
 )
 
 // BatchInserter 批量插入器
@@ -85,11 +85,14 @@ func (bi *BatchInserter) GetSkippedColumns() []string {
 	return bi.skippedCols
 }
 
-// SetMaxBatchBytes 设置单批次最大字节数，0 保持默认值
+// SetMaxBatchBytes 设置单批次最大字节数。正数覆盖默认 32MB 限制，0 保持默认值，负数表示不限制
 func (bi *BatchInserter) SetMaxBatchBytes(bytes int) {
 	if bytes > 0 {
 		bi.maxBatchBytes = int64(bytes)
+	} else if bytes < 0 {
+		bi.maxBatchBytes = 0 // 负数表示不限制
 	}
+	// bytes == 0: 保持构造函数设置的默认值（32MB）
 }
 
 // SetContext sets the context for SQL execution cancellation.
@@ -162,7 +165,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 
 		// 释放锁后再 Prepare，避免长时间持有写锁阻塞其他 goroutine
 		bi.stmtMu.Unlock()
-		stmt, err := bi.db.Prepare(query)
+		stmt, err := bi.db.PrepareContext(bi.ctx, query)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 		}
@@ -175,7 +178,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 	}
 
 	// 不使用缓存，每次重新 Prepare
-	stmt, err := bi.db.Prepare(query)
+	stmt, err := bi.db.PrepareContext(bi.ctx, query)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
 	}
@@ -211,13 +214,17 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 		return 0, nil
 	}
 
+	if len(bi.columns) == 0 {
+		return 0, fmt.Errorf("no columns defined for table %s", bi.tableName)
+	}
+
 	// 根据列数计算每批最大行数，避免超出 MySQL prepared statement 占位符限制
 	maxRowsPerBatch := (maxPreparedPlaceholders * 95) / (100 * len(bi.columns))
 	if maxRowsPerBatch < 1 {
 		maxRowsPerBatch = 1
 	}
 
-	if len(rows) <= maxRowsPerBatch && estimateBatchBytes(rows) <= bi.maxBatchBytes {
+	if len(rows) <= maxRowsPerBatch && (bi.maxBatchBytes <= 0 || estimateBatchBytes(rows) <= bi.maxBatchBytes) {
 		bi.stmtMu.RLock()
 		cachedCapacity := bi.cachedRows
 		bi.stmtMu.RUnlock()
@@ -237,8 +244,10 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 			end = len(rows)
 		}
 		// 字节数限制：二分法找最大不超限的子批次
-		for end > i+1 && estimateBatchBytes(rows[i:end]) > bi.maxBatchBytes {
-			end = (i + end) / 2
+		if bi.maxBatchBytes > 0 {
+			for end > i+1 && estimateBatchBytes(rows[i:end]) > bi.maxBatchBytes {
+				end = (i + end) / 2
+			}
 		}
 		affected, err := bi.insertBatchSingleWithAutoWiden(rows[i:end], false)
 		if err != nil {

@@ -202,16 +202,19 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 			logger.Infof("[DRY RUN]   - %s", tableName)
 		}
 	} else if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
-		rowSizeFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
+		rowSizeFailed, allFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
 		if err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
 		}
-		if len(rowSizeFailed) > 0 {
-			if writeErr := writeRowSizeFailedTables(rowSizeFailed); writeErr != nil {
-				logger.Errorf("Failed to write row size failed tables file: %v", writeErr)
+		if len(allFailed) > 0 {
+			if len(rowSizeFailed) > 0 {
+				if writeErr := writeRowSizeFailedTables(rowSizeFailed); writeErr != nil {
+					logger.Errorf("Failed to write row size failed tables file: %v", writeErr)
+				}
 			}
-			allTableNames = excludeTables(allTableNames, rowSizeFailed, tableMatcher)
-			logger.Warnf("Excluded %d row-size-too-large tables from subsequent phases: %v", len(rowSizeFailed), rowSizeFailed)
+			allTableNames = excludeTables(allTableNames, allFailed, tableMatcher)
+			logger.Warnf("Excluded %d failed tables from subsequent phases (row_size: %d, other: %d): %v",
+				len(allFailed), len(rowSizeFailed), len(allFailed)-len(rowSizeFailed), allFailed)
 		}
 	}
 
@@ -393,7 +396,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
-func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) ([]string, error) {
+func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) (rowSizeFailed []string, allFailed []string, err error) {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
 	tracker.StartPhase("create-missing-tables", len(missingTables))
@@ -513,7 +516,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 
 	// context 停止且有错误时返回
 	if err := migrationCtx.Err(); err != nil {
-		return rowSizeFailedTables, err
+		return rowSizeFailedTables, failedTableNames, err
 	}
 
 	successCount := int(totalSuccess.Load())
@@ -529,10 +532,10 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	}
 
 	if failCount > 0 {
-		return rowSizeFailedTables, fmt.Errorf("%d tables failed to create", failCount)
+		return rowSizeFailedTables, failedTableNames, fmt.Errorf("%d tables failed to create", failCount)
 	}
 
-	return rowSizeFailedTables, nil
+	return rowSizeFailedTables, failedTableNames, nil
 }
 
 type ddlExecutor interface {
@@ -558,11 +561,11 @@ func createTableDDLWithRetry(executor ddlExecutor, tableConverter *converter.Tab
 			AllowNumericDegradation: true,
 		})
 		if retryErr != nil {
-			return result, fmt.Errorf("normal create failed with row size error: %w; aggressive conversion failed: %v", firstErr, retryErr)
+			return result, fmt.Errorf("normal create failed with row size error: %w; aggressive conversion failed: %w", firstErr, retryErr)
 		}
 		logColumnDegradations(retryResult.Degradations)
 		if err := executor.ExecuteDDL(retryResult.SQL); err != nil {
-			return retryResult, fmt.Errorf("normal create failed with row size error: %w; aggressive retry failed: %v", firstErr, err)
+			return retryResult, fmt.Errorf("normal create failed with row size error: %w; aggressive retry failed: %w", firstErr, err)
 		}
 		return retryResult, nil
 	}
@@ -642,6 +645,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 		}
 		tracker.UpdateTableProgress(tableName, processedRows, insertedRows)
 	})
+	dataImporter.WithContext(migrationCtx.Context())
 	defer dataImporter.Close()
 
 	// 使用 worker pool 并发导入

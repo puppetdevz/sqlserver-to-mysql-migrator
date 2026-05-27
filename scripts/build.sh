@@ -202,9 +202,9 @@ main() {
     echo ""
     echo "使用方式:"
     echo "  chmod +x dist/migrate-*"
-    echo "  ./dist/sqlserver-to-mysql-migrator-darwin-arm64 --config configs/config.yaml   # macOS"
-    echo "  ./dist/sqlserver-to-mysql-migrator-linux-amd64 --config configs/config.yaml   # Linux x86_64"
-    echo "  ./dist/sqlserver-to-mysql-migrator-linux-arm64 --config configs/config.yaml    # Linux ARM64"
+    echo "  ./dist/sqlserver-to-mysql-migrator-darwin-arm64 --config config.yaml   # macOS"
+    echo "  ./dist/sqlserver-to-mysql-migrator-linux-amd64 --config config.yaml   # Linux x86_64"
+    echo "  ./dist/sqlserver-to-mysql-migrator-linux-arm64 --config config.yaml    # Linux ARM64"
     echo "========================================"
 
     if [ ${#failed[@]} -gt 0 ]; then

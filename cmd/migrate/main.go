@@ -585,7 +585,7 @@ func writeRowSizeFailedTables(tables []string) error {
 func loadCompletedTables() []string {
 	data, err := os.ReadFile(completedTablesFile)
 	if err != nil {
-		return nil
+		return []string{}
 	}
 	lines := strings.Split(string(data), "\n")
 	var tables []string

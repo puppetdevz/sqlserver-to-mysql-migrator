@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,7 @@ func Load(configPath string) (*Config, error) {
 
 	// 如果 local 文件存在，解析并合并
 	if localData != nil {
+		fmt.Fprintf(os.Stderr, "Config: merging local overrides from %s\n", localPath)
 		var localMap map[string]any
 		if err := yaml.Unmarshal(localData, &localMap); err != nil {
 			return nil, fmt.Errorf("failed to parse local config file: %w", err)
@@ -46,7 +48,9 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal(mergedData, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(mergedData))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse merged config: %w", err)
 	}
 

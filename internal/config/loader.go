@@ -3,22 +3,51 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Load 从文件加载配置
+// Load 从文件加载配置，自动合并同目录下的 .local.yaml 文件。
+// local 文件路径由基础文件路径推导：config.yaml → config.local.yaml
 func Load(configPath string) (*Config, error) {
-	// 读取配置文件
-	data, err := os.ReadFile(configPath)
+	// 读取基础配置文件
+	baseData, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// 解析 YAML
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	// 检查并加载 local 配置文件
+	localPath := localPath(configPath)
+	localData, err := os.ReadFile(localPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read local config file: %w", err)
+	}
+
+	// 解析 base YAML 到泛型 map
+	var baseMap map[string]any
+	if err := yaml.Unmarshal(baseData, &baseMap); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// 如果 local 文件存在，解析并合并
+	if localData != nil {
+		var localMap map[string]any
+		if err := yaml.Unmarshal(localData, &localMap); err != nil {
+			return nil, fmt.Errorf("failed to parse local config file: %w", err)
+		}
+		baseMap = mergeMaps(baseMap, localMap)
+	}
+
+	// 将合并后的 map 重新 marshal 为 YAML，再 unmarshal 到 Config 结构体
+	mergedData, err := yaml.Marshal(baseMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal merged config: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(mergedData, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse merged config: %w", err)
 	}
 
 	// 验证配置
@@ -27,6 +56,29 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func localPath(configPath string) string {
+	ext := filepath.Ext(configPath)
+	base := configPath[:len(configPath)-len(ext)]
+	return base + ".local" + ext
+}
+
+func mergeMaps(base, override map[string]any) map[string]any {
+	result := make(map[string]any, len(base)+len(override))
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range override {
+		if overrideMap, ok := v.(map[string]any); ok {
+			if baseMap, ok := result[k].(map[string]any); ok {
+				result[k] = mergeMaps(baseMap, overrideMap)
+				continue
+			}
+		}
+		result[k] = v
+	}
+	return result
 }
 
 func newBool(v bool) *bool {

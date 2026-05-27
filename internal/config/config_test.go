@@ -246,7 +246,6 @@ target:
   database: "migration_example"
   user: "root"
   password: "base-pass"
-  charset: "utf8mb4"
 migration:
   batch_size: 100
   max_workers: 1
@@ -258,6 +257,9 @@ logging:
 	local := writeConfigForTest(t, `
 target:
   password: "real-secret"
+  write_timeout: 60
+converter:
+  max_varchar_to_text_size: 300
 `)
 	localPath := base[:len(base)-len(".yaml")] + ".local.yaml"
 	if err := os.Rename(local, localPath); err != nil {
@@ -268,14 +270,21 @@ target:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
+	// base fields preserved
 	if cfg.Target.Host != "localhost" {
 		t.Fatalf("Target.Host = %s, want localhost", cfg.Target.Host)
 	}
+	// local scalar override
 	if cfg.Target.Password != "real-secret" {
 		t.Fatalf("Target.Password = %s, want real-secret", cfg.Target.Password)
 	}
-	if cfg.Target.Charset != "utf8mb4" {
-		t.Fatalf("Target.Charset = %s, want utf8mb4", cfg.Target.Charset)
+	// local added new key to nested map
+	if cfg.Target.WriteTimeout != 60 {
+		t.Fatalf("Target.WriteTimeout = %d, want 60", cfg.Target.WriteTimeout)
+	}
+	// local added new top-level section
+	if cfg.Converter.MaxVarcharToTextSize != 300 {
+		t.Fatalf("Converter.MaxVarcharToTextSize = %d, want 300", cfg.Converter.MaxVarcharToTextSize)
 	}
 }
 

@@ -665,6 +665,14 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	dataImporter.WithContext(migrationCtx.Context())
 	defer dataImporter.Close()
 
+	completedFile, err := os.OpenFile(completedTablesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		logger.Warnf("Failed to open %s for appending: %v", completedTablesFile, err)
+	}
+	if completedFile != nil {
+		defer completedFile.Close()
+	}
+
 	// 使用 worker pool 并发导入
 	var wg sync.WaitGroup
 	tableChan := make(chan string, len(tablesToImport))
@@ -747,6 +755,13 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 						logger.Warnf("[Worker %d] Failed to mark table %s as completed: %v", workerID, tableName, err)
 					}
 					tracker.CompletePhaseItem()
+
+					if completedFile != nil {
+						if _, err := completedFile.WriteString(tableName + "\n"); err != nil {
+							logger.Warnf("[Worker %d] Failed to record completed table %s: %v", workerID, tableName, err)
+						}
+					}
+
 					resultChan <- result
 				} else {
 					logger.Warnf("[Worker %d] Table partially imported: %s (%d rows, %d errors)",

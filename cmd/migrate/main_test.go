@@ -335,6 +335,30 @@ func TestImportDataWithCSVMappingReturnsContextErrorBeforeDispatch(t *testing.T)
 	}
 }
 
+func TestFinalErrorPrefersMigrationContextStopCause(t *testing.T) {
+	migrationCtx := migration.NewMigrationContext()
+	wantErr := errors.New("failed to import table WF_CASE_RUN: failed to execute batch insert: invalid connection")
+	migrationCtx.Stop(wantErr)
+
+	err := finalError(20, "tables failed to import", migrationCtx)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("finalError() error = %v, want %v", err, wantErr)
+	}
+	if strings.Contains(err.Error(), "20 tables failed") {
+		t.Fatalf("finalError() returned aggregate fallout instead of root stop cause: %v", err)
+	}
+}
+
+func TestFinalErrorReportsAggregateWithoutStopCause(t *testing.T) {
+	err := finalError(3, "tables failed to import", migration.NewMigrationContext())
+	if err == nil {
+		t.Fatal("finalError() error = nil, want aggregate failure")
+	}
+	if !strings.Contains(err.Error(), "3 tables failed to import") {
+		t.Fatalf("finalError() error = %v, want aggregate failure", err)
+	}
+}
+
 // ============================================================================
 // Fix #8: createTableDDLWithRetry 错误包装使用 %w 使 errors.Is 能遍历整个链
 // ============================================================================

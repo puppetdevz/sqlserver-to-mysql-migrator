@@ -381,18 +381,11 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 	wg.Wait()
 
 	// context 停止且有错误时返回
-	if err := migrationCtx.Err(); err != nil {
-		return err
-	}
-
 	failCount := int(totalFail.Load())
 	successCount := int(totalSuccess.Load())
 	logger.Infof("Truncate completed: %d success, %d failed", successCount, failCount)
 
-	if failCount > 0 {
-		return fmt.Errorf("%d tables failed to truncate", failCount)
-	}
-	return nil
+	return finalError(failCount, "tables failed to truncate", migrationCtx)
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
@@ -779,8 +772,15 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	// 生成数据导入报告
 	generateMigrationReport("Data Import Report", nil, successCount, failCount, failedTables)
 
+	return finalError(failCount, "tables failed to import", migrationCtx)
+}
+
+func finalError(failCount int, desc string, migrationCtx *migration.MigrationContext) error {
+	if err := migrationCtx.Err(); err != nil {
+		return err
+	}
 	if failCount > 0 {
-		return fmt.Errorf("%d tables failed to import", failCount)
+		return fmt.Errorf("%d %s", failCount, desc)
 	}
 	return nil
 }

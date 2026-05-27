@@ -20,6 +20,7 @@ type TableState struct {
 	TotalRows     int64           `json:"total_rows"`
 	ProcessedRows int64           `json:"processed_rows"`
 	InsertedRows  int64           `json:"inserted_rows"`
+	TotalRowsSet  bool            `json:"total_rows_set"`
 	ErrorCount    int64           `json:"error_count"`
 	ErrorMessage  string          `json:"error_message,omitempty"`
 	StartTime     time.Time       `json:"start_time"`
@@ -34,6 +35,7 @@ type TableState struct {
 type TableProgress struct {
 	TableName     string
 	TotalRows     int64
+	TotalRowsSet  bool
 	ProcessedRows int64
 	InsertedRows  int64
 	Percent       float64
@@ -172,6 +174,7 @@ func (ms *MigrationState) GetActiveTables() map[string]*TableProgress {
 		p := &TableProgress{
 			TableName:     tableName,
 			TotalRows:     state.TotalRows,
+			TotalRowsSet:  state.TotalRowsSet,
 			ProcessedRows: state.ProcessedRows,
 			InsertedRows:  state.InsertedRows,
 		}

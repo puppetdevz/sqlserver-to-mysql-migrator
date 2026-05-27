@@ -167,6 +167,7 @@ func (t *Tracker) SetTableTotalRows(tableName string, totalRows int64) error {
 		return fmt.Errorf("table state not found: %s", tableName)
 	}
 	state.TotalRows = totalRows
+	state.TotalRowsSet = true
 	return nil
 }
 
@@ -305,8 +306,10 @@ func (t *Tracker) reportProgress() {
 		for name, p := range activeTables {
 			if p.TotalRows > 0 {
 				logger.Infof("  - %s: %d/%d rows (%.1f%%)", name, p.ProcessedRows, p.TotalRows, p.Percent)
+			} else if p.TotalRowsSet {
+				logger.Infof("  - %s: no data rows (CSV empty)", name)
 			} else {
-				logger.Infof("  - %s: %d rows inserted", name, p.InsertedRows)
+				logger.Infof("  - %s: reading CSV...", name)
 			}
 		}
 	}

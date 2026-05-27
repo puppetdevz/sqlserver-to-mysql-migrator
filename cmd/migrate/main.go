@@ -183,6 +183,13 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		logger.Infof("Skipped %d tables per skip_tables config: %v", before-len(allTableNames), cfg.Migration.SkipTables)
 	}
 
+	completedTables := loadCompletedTables()
+	if len(completedTables) > 0 {
+		before := len(allTableNames)
+		allTableNames = excludeTables(allTableNames, completedTables, tableMatcher)
+		logger.Infof("Skipped %d tables per %s: %v", before-len(allTableNames), completedTablesFile, completedTables)
+	}
+
 	tracker.SetPlannedTotalTables(len(allTableNames))
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 

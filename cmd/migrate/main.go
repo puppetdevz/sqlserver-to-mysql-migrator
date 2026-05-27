@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	configPath    = flag.String("config", "configs/config.yaml", "配置文件路径")
+	configPath    = flag.String("config", "config.yaml", "配置文件路径")
 	tables        = flag.String("tables", "", "仅导入指定表（逗号分隔）")
 	createOnly    = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
 	version       = flag.Bool("version", false, "显示版本信息")

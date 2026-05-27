@@ -37,3 +37,6 @@ logs/
 data/
 .go-cache
 .claude/worktrees/
+
+# Local config overrides (secrets, personal overrides)
+config.local.yaml

@@ -82,14 +82,6 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 		return nil, fmt.Errorf("table does not exist: %s", ti.tableName), nil
 	}
 
-	// 如果配置要求，先清空表
-	if ti.cfg.Migration.TruncateBeforeImport {
-		logger.Infof("Truncating table: %s", ti.tableName)
-		if err := ti.conn.TruncateTable(ti.tableName); err != nil {
-			return nil, fmt.Errorf("failed to truncate table: %w", err), nil
-		}
-	}
-
 	// 打开 CSV 文件
 	file, err := os.Open(ti.csvPath)
 	if err != nil {

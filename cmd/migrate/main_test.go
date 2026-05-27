@@ -168,16 +168,16 @@ func TestCreateOnlyExpectedOverallClosure(t *testing.T) {
 	}
 }
 
-func TestFinalizeCreateOnlyProgressSkipsUncreatedMissingTablesWhenCreationDisabled(t *testing.T) {
+func TestFinalizeCreateOnlyProgressMarksExistingTablesAsSkipped(t *testing.T) {
 	tracker, err := progress.NewTracker()
 	if err != nil {
 		t.Fatalf("NewTracker() error = %v", err)
 	}
 	defer tracker.Close()
 
-	tracker.SetPlannedTotalTables(2)
+	tracker.SetPlannedTotalTables(1)
 
-	if err := finalizeCreateOnlyProgress(tracker, []string{"existing_table"}, []string{"missing_table"}, false); err != nil {
+	if err := finalizeCreateOnlyProgress(tracker, []string{"existing_table"}); err != nil {
 		t.Fatalf("finalizeCreateOnlyProgress() error = %v", err)
 	}
 
@@ -185,14 +185,8 @@ func TestFinalizeCreateOnlyProgressSkipsUncreatedMissingTablesWhenCreationDisabl
 	if info.CompletedCount != 0 {
 		t.Fatalf("CompletedCount = %d, want 0", info.CompletedCount)
 	}
-	if info.SkippedCount != 2 {
-		t.Fatalf("SkippedCount = %d, want 2", info.SkippedCount)
-	}
-	if info.Progress != 100.0 {
-		t.Fatalf("Progress = %v, want 100", info.Progress)
-	}
-	if !info.IsCompleted {
-		t.Fatal("IsCompleted = false, want true")
+	if info.SkippedCount != 1 {
+		t.Fatalf("SkippedCount = %d, want 1 (only existing tables are skipped)", info.SkippedCount)
 	}
 }
 

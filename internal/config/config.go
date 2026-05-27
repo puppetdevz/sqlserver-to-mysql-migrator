@@ -43,8 +43,6 @@ type MigrationConfig struct {
 	TableNameCaseSensitive *bool    `yaml:"table_name_case_sensitive"`
 	BatchSize              int      `yaml:"batch_size"`
 	MaxWorkers             int      `yaml:"max_workers"`
-	TruncateBeforeImport   bool     `yaml:"truncate_before_import"`
-	CreateMissingTables    bool     `yaml:"create_missing_tables"`
 	OnDuplicate            string   `yaml:"on_duplicate"`       // "replace" or "ignore"
 	MaxRowsPerTable        int      `yaml:"max_rows_per_table"` // 每表最大导入行数，0 表示不限制
 	SkipTables             []string `yaml:"skip_tables"`        // 要跳过的表名列表

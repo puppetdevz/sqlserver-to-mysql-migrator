@@ -201,7 +201,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		for _, tableName := range classification.MissingTables {
 			logger.Infof("[DRY RUN]   - %s", tableName)
 		}
-	} else if cfg.Migration.CreateMissingTables && len(classification.MissingTables) > 0 {
+	} else if len(classification.MissingTables) > 0 {
 		rowSizeFailed, allFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
 		if err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
@@ -219,7 +219,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	}
 
 	if *createOnly {
-		if err := finalizeCreateOnlyProgress(tracker, classification.ExistingTables, classification.MissingTables, cfg.Migration.CreateMissingTables); err != nil {
+		if err := finalizeCreateOnlyProgress(tracker, classification.ExistingTables); err != nil {
 			logger.Warnf("Failed to finalize create-only progress: %v", err)
 		}
 		logger.Info("Create tables only mode: skipping data import")
@@ -785,25 +785,12 @@ func finalError(failCount int, desc string, migrationCtx *migration.MigrationCon
 	return nil
 }
 
-func finalizeCreateOnlyProgress(tracker *progress.Tracker, existingTables, missingTables []string, createMissingTables bool) error {
+func finalizeCreateOnlyProgress(tracker *progress.Tracker, existingTables []string) error {
 	for _, tableName := range existingTables {
 		if err := tracker.SkipTable(tableName, "table already exists"); err != nil {
 			return fmt.Errorf("mark existing table %s as skipped: %w", tableName, err)
 		}
 	}
-
-	if !createMissingTables {
-		for _, tableName := range missingTables {
-			state := tracker.GetTableState(tableName)
-			if state != nil && state.Status == progress.StatusCompleted {
-				continue
-			}
-			if err := tracker.SkipTable(tableName, "table creation disabled"); err != nil {
-				return fmt.Errorf("mark missing table %s as skipped: %w", tableName, err)
-			}
-		}
-	}
-
 	return nil
 }
 

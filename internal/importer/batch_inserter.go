@@ -403,6 +403,46 @@ func isRetryableConnectionError(err error) bool {
 		(errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, driver.ErrBadConn))
 }
 
+func isDatabaseCapacityError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+
+	switch mysqlErr.Number {
+	case 3, 1021, 1114:
+		return true
+	default:
+		return false
+	}
+}
+
+func databaseCapacityDiagnostic(tableName string, batchNum int, err error) string {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) || !isDatabaseCapacityError(err) {
+		return ""
+	}
+
+	cause := "MySQL cannot allocate more storage for this write"
+	switch mysqlErr.Number {
+	case 3:
+		cause = "MySQL failed while writing a file"
+	case 1021:
+		cause = "MySQL reports disk full while writing a table or temporary file"
+	case 1114:
+		cause = "MySQL reports the target table or its tablespace is full"
+	}
+
+	return fmt.Sprintf(
+		"Failure owner: MySQL storage layer; this is not a CSV parser or migration-program logic error. table=%s batch=%d mysql_error=%d mysql_message=%q. Cause: %s. Next checks: check target MySQL datadir free space, container or cloud storage quota, InnoDB tablespace limits, MySQL tmpdir free space, and MySQL error log.",
+		tableName,
+		batchNum,
+		mysqlErr.Number,
+		mysqlErr.Message,
+		cause,
+	)
+}
+
 func (bi *BatchInserter) resetOnConnErr(err error) {
 	if isRetryableConnectionError(err) {
 		bi.resetStmt()

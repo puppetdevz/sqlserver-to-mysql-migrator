@@ -381,6 +381,9 @@ type batchResult struct {
 }
 
 func batchRetryPolicy(err error) (int, time.Duration) {
+	if isDatabaseCapacityError(err) {
+		return 1, 0
+	}
 	if isRetryableConnectionError(err) {
 		return maxConnectionRetries, connectionRetryBaseDelay
 	}
@@ -765,6 +768,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			}
 
 			if insertErr != nil {
+				if diagnostic := databaseCapacityDiagnostic(ti.tableName, bd.batchNum, insertErr); diagnostic != "" {
+					logger.Errorf("%s", diagnostic)
+					insertErr = fmt.Errorf("%s: %w", diagnostic, insertErr)
+				}
 				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
 				logger.Errorf("Failed to insert batch %d for table %s after %d attempts: %v", bd.batchNum, ti.tableName, attempts, insertErr)
 				if fastFail {

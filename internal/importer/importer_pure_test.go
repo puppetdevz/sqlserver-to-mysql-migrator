@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // ============================================================================
@@ -813,6 +815,67 @@ func TestBatchRetryPolicyKeepsDefaultForDataErrors(t *testing.T) {
 	}
 	if baseDelay != retryDelay {
 		t.Fatalf("baseDelay = %s, want %s", baseDelay, retryDelay)
+	}
+}
+
+func TestBatchRetryPolicyDoesNotRetryDatabaseCapacityErrors(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", &mysql.MySQLError{
+		Number:  1114,
+		Message: "The table 'sample_main_104' is full",
+	})
+
+	attempts, baseDelay := batchRetryPolicy(err)
+
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if baseDelay != 0 {
+		t.Fatalf("baseDelay = %s, want 0", baseDelay)
+	}
+}
+
+func TestDatabaseCapacityErrorMatchesDiskWriteErrors(t *testing.T) {
+	cases := []uint16{3, 1021, 1114}
+	for _, code := range cases {
+		err := fmt.Errorf("wrapped: %w", &mysql.MySQLError{
+			Number:  code,
+			Message: "capacity related error",
+		})
+		if !isDatabaseCapacityError(err) {
+			t.Fatalf("isDatabaseCapacityError(%d) = false, want true", code)
+		}
+	}
+}
+
+func TestDatabaseCapacityDiagnosticExplainsMySQLOwnership(t *testing.T) {
+	err := fmt.Errorf("failed to execute batch insert: %w", &mysql.MySQLError{
+		Number:  1114,
+		Message: "The table 'sample_main_104' is full",
+	})
+
+	diagnostic := databaseCapacityDiagnostic("sample_main_104", 7, err)
+
+	required := []string{
+		"Failure owner: MySQL storage layer",
+		"not a CSV parser or migration-program logic error",
+		"table=sample_main_104",
+		"batch=7",
+		"mysql_error=1114",
+		"check target MySQL datadir free space",
+		"container or cloud storage quota",
+	}
+	for _, want := range required {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("diagnostic missing %q:\n%s", want, diagnostic)
+		}
+	}
+}
+
+func TestDatabaseCapacityDiagnosticIgnoresNonCapacityErrors(t *testing.T) {
+	diagnostic := databaseCapacityDiagnostic("sample_main_104", 7, fmt.Errorf("data too long"))
+
+	if diagnostic != "" {
+		t.Fatalf("diagnostic = %q, want empty", diagnostic)
 	}
 }
 

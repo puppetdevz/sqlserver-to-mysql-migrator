@@ -706,6 +706,8 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 		defer slowFile.Close()
 	}
 
+	slowThreshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
+
 	// 使用 worker pool 并发导入
 	var wg sync.WaitGroup
 	tableChan := make(chan string, len(tablesToImport))
@@ -752,7 +754,6 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				// 开始跟踪
 				tracker.StartTable(tableName, csvPath, false)
 
-				// 导入数据（计时）
 				importStart := time.Now()
 				result, err, diag := dataImporter.ImportTable(tableName)
 				elapsed := time.Since(importStart)
@@ -795,10 +796,9 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 						}
 					}
 
-					threshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
-					if elapsed > threshold {
+					if elapsed > slowThreshold {
 						logger.Infof("[Worker %d] Table %s exceeded slow threshold: %s > %s",
-							workerID, tableName, elapsed.Truncate(time.Second), threshold)
+							workerID, tableName, elapsed.Truncate(time.Second), slowThreshold)
 						if slowFile != nil {
 							if _, err := slowFile.WriteString(tableName + "\n"); err != nil {
 								logger.Warnf("[Worker %d] Failed to record slow table %s: %v",

@@ -266,6 +266,7 @@ func LogEffective(cfg *Config, cli CLIArgs) {
 		logger.Info("  skip_tables: (none)")
 	}
 	logger.Infof("  max_batch_bytes: %s", cfg.Migration.EffectiveMaxBatchBytes())
+	logger.Infof("  slow_table_threshold_minutes: %d", cfg.Migration.EffectiveSlowTableThresholdMinutes())
 
 	logger.Info("[logging]")
 	logger.Infof("  level: %s", cfg.Logging.Level)

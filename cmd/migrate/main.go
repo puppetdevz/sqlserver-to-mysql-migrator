@@ -42,6 +42,7 @@ const (
 
 	rowSizeFailedTablesFile = "row_size_failed_tables.txt"
 	completedTablesFile     = "completed_tables.txt"
+	slowTablesFile          = "slow_tables.txt"
 )
 
 func logImportDiagnostic(diag *importer.ImportDiagnostic) {
@@ -697,6 +698,14 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 		defer completedFile.Close()
 	}
 
+	slowFile, err := os.OpenFile(slowTablesFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		logger.Warnf("Failed to open %s for appending: %v", slowTablesFile, err)
+	}
+	if slowFile != nil {
+		defer slowFile.Close()
+	}
+
 	// 使用 worker pool 并发导入
 	var wg sync.WaitGroup
 	tableChan := make(chan string, len(tablesToImport))
@@ -743,8 +752,10 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				// 开始跟踪
 				tracker.StartTable(tableName, csvPath, false)
 
-				// 导入数据
+				// 导入数据（计时）
+				importStart := time.Now()
 				result, err, diag := dataImporter.ImportTable(tableName)
+				elapsed := time.Since(importStart)
 				if err != nil {
 					logger.Errorf("[Worker %d] Failed to import table %s: %v", workerID, tableName, err)
 					logImportDiagnostic(diag)
@@ -781,6 +792,18 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					if completedFile != nil {
 						if _, err := completedFile.WriteString(tableName + "\n"); err != nil {
 							logger.Warnf("[Worker %d] Failed to record completed table %s: %v", workerID, tableName, err)
+						}
+					}
+
+					threshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
+					if elapsed > threshold {
+						logger.Infof("[Worker %d] Table %s exceeded slow threshold: %s > %s",
+							workerID, tableName, elapsed.Truncate(time.Second), threshold)
+						if slowFile != nil {
+							if _, err := slowFile.WriteString(tableName + "\n"); err != nil {
+								logger.Warnf("[Worker %d] Failed to record slow table %s: %v",
+									workerID, tableName, err)
+							}
 						}
 					}
 

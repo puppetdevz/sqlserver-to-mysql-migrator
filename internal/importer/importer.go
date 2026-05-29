@@ -39,6 +39,7 @@ type TableImporter struct {
 	errorRecorder    *ErrorRecorder
 	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
 	ctx              context.Context
+	countCSVRowsFunc func(*os.File) (int64, error)
 }
 
 type dbColumnInfo struct {
@@ -50,12 +51,13 @@ type dbColumnInfo struct {
 // NewTableImporter 创建表导入器
 func NewTableImporter(conn *database.Connection, cfg *config.Config, tableName string, csvPath string, errorRecorder *ErrorRecorder) *TableImporter {
 	return &TableImporter{
-		conn:          conn,
-		cfg:           cfg,
-		tableName:     tableName,
-		csvPath:       csvPath,
-		errorRecorder: errorRecorder,
-		ctx:           context.Background(),
+		conn:             conn,
+		cfg:              cfg,
+		tableName:        tableName,
+		csvPath:          csvPath,
+		errorRecorder:    errorRecorder,
+		ctx:              context.Background(),
+		countCSVRowsFunc: countCSVRows,
 	}
 }
 
@@ -96,7 +98,7 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	actualTableName := ti.conn.GetActualTableName(ti.tableName)
 
 	// 统计 CSV 总行数（用于进度显示）
-	csvTotalRows, err := countCSVRows(file)
+	csvTotalRows, err := ti.countRowsForProgress(file)
 	if err != nil {
 		logger.Warnf("Failed to count CSV rows for %s: %v", ti.tableName, err)
 	}
@@ -133,6 +135,17 @@ func countCSVRows(f *os.File) (int64, error) {
 	}
 
 	return count, nil
+}
+
+func (ti *TableImporter) countRowsForProgress(file *os.File) (int64, error) {
+	if ti.cfg != nil && !ti.cfg.Migration.ShouldCountCSVRowsBeforeImport() {
+		return 0, nil
+	}
+	counter := ti.countCSVRowsFunc
+	if counter == nil {
+		counter = countCSVRows
+	}
+	return counter(file)
 }
 
 // getDBColumns 获取数据库中表的列

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 )
 
 // ============================================================================
@@ -884,5 +886,62 @@ func TestBatchRetryDelayCapsExponentialBackoff(t *testing.T) {
 
 	if delay != 5*time.Second {
 		t.Fatalf("delay = %s, want 5s", delay)
+	}
+}
+
+func TestCountRowsForProgressSkipsWhenDisabled(t *testing.T) {
+	disabled := false
+	ti := &TableImporter{
+		cfg: &config.Config{
+			Migration: config.MigrationConfig{
+				CountCSVRowsBeforeImport: &disabled,
+			},
+		},
+		countCSVRowsFunc: func(*os.File) (int64, error) {
+			t.Fatal("countCSVRowsFunc should not be called when pre-count is disabled")
+			return 0, nil
+		},
+	}
+
+	file, err := os.CreateTemp(t.TempDir(), "rows-*.csv")
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	defer file.Close()
+
+	got, err := ti.countRowsForProgress(file)
+	if err != nil {
+		t.Fatalf("countRowsForProgress() error = %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("countRowsForProgress() = %d, want 0 when disabled", got)
+	}
+}
+
+func TestCountRowsForProgressUsesCounterByDefault(t *testing.T) {
+	called := false
+	ti := &TableImporter{
+		cfg: &config.Config{},
+		countCSVRowsFunc: func(*os.File) (int64, error) {
+			called = true
+			return 42, nil
+		},
+	}
+
+	file, err := os.CreateTemp(t.TempDir(), "rows-*.csv")
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	defer file.Close()
+
+	got, err := ti.countRowsForProgress(file)
+	if err != nil {
+		t.Fatalf("countRowsForProgress() error = %v", err)
+	}
+	if !called {
+		t.Fatal("countCSVRowsFunc was not called")
+	}
+	if got != 42 {
+		t.Fatalf("countRowsForProgress() = %d, want 42", got)
 	}
 }

@@ -22,12 +22,15 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/tablescope"
 )
 
 var (
 	configPath    = flag.String("config", "config.yaml", "配置文件路径")
 	tables        = flag.String("tables", "", "仅导入指定表（逗号分隔）")
 	createOnly    = flag.Bool("create-tables-only", false, "仅创建缺失表，不导入数据")
+	reimport      = flag.Bool("reimport-tables", false, "开启指定表重导，仅处理 --reimport-table-file 中的表")
+	reimportFile  = flag.String("reimport-table-file", "", "指定表重导清单 TXT 文件，每行一个表名")
 	version       = flag.Bool("version", false, "显示版本信息")
 	removePostfix = flag.String("remove-postfix", "", "移除 CSV 文件名的指定后缀")
 	dryRun        = flag.Bool("dry-run", false, "预览模式，不实际执行")
@@ -114,10 +117,17 @@ func main() {
 	logger.Infof("Version: %s", Version)
 	logger.Infof("Config: %s", *configPath)
 
+	tableScope, err := tablescope.Resolve(*tables, *reimport, *reimportFile)
+	if err != nil {
+		logger.Fatalf("Invalid table scope configuration: %v", err)
+	}
+
 	config.LogEffective(cfg, config.CLIArgs{
-		Tables:     *tables,
-		CreateOnly: *createOnly,
-		DryRun:     *dryRun,
+		Tables:            *tables,
+		CreateOnly:        *createOnly,
+		ReimportTables:    *reimport,
+		ReimportTableFile: *reimportFile,
+		DryRun:            *dryRun,
 	})
 
 	tableMatcher := matcher.NewTableNameMatcher(cfg.Migration.IsTableNameCaseSensitive())
@@ -143,7 +153,11 @@ func main() {
 	if *dryRun {
 		logger.Info("=== DRY RUN MODE: no actual changes will be made ===")
 	}
-	if err := runMigration(cfg, conn, tracker, tableMatcher, *dryRun); err != nil {
+	if err := runMigration(cfg, conn, tracker, tableMatcher, migrationRunOptions{
+		DryRun:     *dryRun,
+		CreateOnly: *createOnly,
+		TableScope: tableScope,
+	}); err != nil {
 		logger.Fatalf("Migration failed: %v", err)
 	}
 
@@ -152,8 +166,31 @@ func main() {
 	logger.Info("=== Database Migration Tool Finished ===")
 }
 
+type migrationRunOptions struct {
+	DryRun     bool
+	CreateOnly bool
+	TableScope tablescope.Scope
+}
+
+func logSelectedTableScopeResult(scope tablescope.Scope, result tablescope.Result) {
+	if !scope.Enabled {
+		return
+	}
+
+	mode := "table scope"
+	if scope.Reimport {
+		mode = "reimport table scope"
+	}
+	logger.Infof("%s loaded: %d requested from %s, %d selected, %d skipped",
+		mode, len(scope.Tables), scope.Source, len(result.Tables), len(result.Skipped))
+	for _, skipped := range result.Skipped {
+		logger.Warnf("%s skipped: table=%s reason=%s source=%s",
+			mode, skipped.Table, skipped.Reason, scope.Source)
+	}
+}
+
 // runMigration executes the full migration pipeline.
-func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker, tableMatcher matcher.TableNameMatcher, dryRun bool) error {
+func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker, tableMatcher matcher.TableNameMatcher, opts migrationRunOptions) error {
 	// 创建迁移上下文
 	migrationCtx := migration.NewMigrationContext()
 	defer func() {
@@ -176,28 +213,25 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	allTableNames := collectDDLTableNames(allDDLs)
 	logger.Infof("Total tables from DDL: %d", len(allTableNames))
 
-	// 如果指定了表列表，过滤
-	if *tables != "" {
-		specifiedTables := strings.Split(*tables, ",")
-		allTableNames = filterTables(allTableNames, specifiedTables, tableMatcher)
-		logger.Infof("Filtered to %d specified tables", len(allTableNames))
-	}
-
-	if len(cfg.Migration.SkipTables) > 0 {
-		before := len(allTableNames)
-		allTableNames = excludeTables(allTableNames, cfg.Migration.SkipTables, tableMatcher)
-		logger.Infof("Skipped %d tables per skip_tables config: %v", before-len(allTableNames), cfg.Migration.SkipTables)
-	}
-
 	completedTables := loadCompletedTables()
-	if len(completedTables) > 0 {
-		before := len(allTableNames)
-		allTableNames = excludeTables(allTableNames, completedTables, tableMatcher)
-		logger.Infof("Skipped %d tables per %s: %v", before-len(allTableNames), completedTablesFile, completedTables)
-	}
 
-	tracker.SetPlannedTotalTables(len(allTableNames))
-	logger.Infof("Overall migration target: %d tables", len(allTableNames))
+	if opts.TableScope.Enabled {
+		selectionResult := tablescope.Apply(allTableNames, opts.TableScope, cfg.Migration.SkipTables, completedTables, tableMatcher)
+		allTableNames = selectionResult.Tables
+		logSelectedTableScopeResult(opts.TableScope, selectionResult)
+	} else {
+		if len(cfg.Migration.SkipTables) > 0 {
+			before := len(allTableNames)
+			allTableNames = tablescope.ExcludeTables(allTableNames, cfg.Migration.SkipTables, tableMatcher)
+			logger.Infof("Skipped %d tables per skip_tables config: %v", before-len(allTableNames), cfg.Migration.SkipTables)
+		}
+
+		if len(completedTables) > 0 {
+			before := len(allTableNames)
+			allTableNames = tablescope.ExcludeTables(allTableNames, completedTables, tableMatcher)
+			logger.Infof("Skipped %d tables per %s: %v", before-len(allTableNames), completedTablesFile, completedTables)
+		}
+	}
 
 	// 分类表（已存在 vs 缺失）
 	inspector := database.NewInspector(conn, tableMatcher)
@@ -209,8 +243,22 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	logger.Infof("Table classification: %d existing, %d missing",
 		len(classification.ExistingTables), len(classification.MissingTables))
 
+	if opts.TableScope.Reimport && len(classification.MissingTables) > 0 {
+		logger.Warnf("Reimport mode only truncates/imports existing tables; %d requested tables are missing and will not be created: %v",
+			len(classification.MissingTables), classification.MissingTables)
+		for _, tableName := range classification.MissingTables {
+			logger.Warnf("reimport table scope skipped: table=%s reason=target table does not exist; reimport mode does not create missing tables source=%s",
+				tableName, opts.TableScope.Source)
+		}
+		allTableNames = classification.ExistingTables
+		classification.MissingTables = nil
+	}
+
+	tracker.SetPlannedTotalTables(len(allTableNames))
+	logger.Infof("Overall migration target: %d tables", len(allTableNames))
+
 	// ========== 步骤 2: DDL 转换 + 表创建 ==========
-	if dryRun {
+	if opts.DryRun {
 		logger.Infof("[DRY RUN] Would create %d missing tables", len(classification.MissingTables))
 		for _, tableName := range classification.MissingTables {
 			logger.Infof("[DRY RUN]   - %s", tableName)
@@ -226,13 +274,13 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 					logger.Errorf("Failed to write row size failed tables file: %v", writeErr)
 				}
 			}
-			allTableNames = excludeTables(allTableNames, allFailed, tableMatcher)
+			allTableNames = tablescope.ExcludeTables(allTableNames, allFailed, tableMatcher)
 			logger.Warnf("Excluded %d failed tables from subsequent phases (row_size: %d, other: %d): %v",
 				len(allFailed), len(rowSizeFailed), len(allFailed)-len(rowSizeFailed), allFailed)
 		}
 	}
 
-	if *createOnly {
+	if opts.CreateOnly {
 		if err := finalizeCreateOnlyProgress(tracker, classification.ExistingTables); err != nil {
 			logger.Warnf("Failed to finalize create-only progress: %v", err)
 		}
@@ -241,7 +289,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	}
 
 	// ========== 步骤 2.5: TRUNCATE 所有已存在表 ==========
-	if dryRun {
+	if opts.DryRun {
 		logger.Infof("[DRY RUN] Would truncate %d existing tables (skipped)", len(classification.ExistingTables))
 	} else if len(classification.ExistingTables) > 0 {
 		if err := truncateExistingTables(conn, classification.ExistingTables, tracker, migrationCtx, cfg); err != nil {
@@ -257,7 +305,7 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	}
 	logger.Infof("Found %d CSV files", len(csvFiles))
 
-	if dryRun {
+	if opts.DryRun {
 		logger.Infof("[DRY RUN] Would import data from %d CSV files into %d tables (skipped)", len(csvFiles), len(allTableNames))
 		if err := previewCSVImport(cfg, csvFiles, allTableNames, classification.ExistingTables, tableMatcher); err != nil {
 			logger.Errorf("Preview analysis failed: %v", err)
@@ -275,34 +323,6 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 func scanCSVFiles(directory string) ([]string, error) {
 	pattern := filepath.Join(directory, "*.csv")
 	return filepath.Glob(pattern)
-}
-
-// filterTables 过滤表列表
-func filterTables(allTables []string, specifiedTables []string, tableMatcher matcher.TableNameMatcher) []string {
-	specifiedSet := tableMatcher.BuildSet(specifiedTables)
-
-	var filtered []string
-	for _, table := range allTables {
-		if _, ok := specifiedSet[tableMatcher.Key(table)]; ok {
-			filtered = append(filtered, table)
-		}
-	}
-
-	return filtered
-}
-
-func excludeTables(allTables []string, excludeList []string, tableMatcher matcher.TableNameMatcher) []string {
-	excludeSet := tableMatcher.BuildSet(excludeList)
-
-	var kept []string
-	for _, table := range allTables {
-		if _, ok := excludeSet[tableMatcher.Key(table)]; ok {
-			continue
-		}
-		kept = append(kept, table)
-	}
-
-	return kept
 }
 
 func collectDDLTableNames(allDDLs map[string]*parser.TableDDL) []string {

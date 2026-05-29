@@ -196,10 +196,12 @@ func (m MigrationConfig) EffectiveMaxBatchBytes() string {
 
 // CLIArgs holds CLI flag values for diagnostic logging.
 type CLIArgs struct {
-	Tables        string
-	CreateOnly    bool
-	DryRun        bool
-	RemovePostfix string
+	Tables            string
+	CreateOnly        bool
+	ReimportTables    bool
+	ReimportTableFile string
+	DryRun            bool
+	RemovePostfix     string
 }
 
 // LogEffective prints all effective configuration to the logger.
@@ -266,6 +268,10 @@ func LogEffective(cfg *Config, cli CLIArgs) {
 		logger.Info("  tables: (all)")
 	}
 	logger.Infof("  create_tables_only: %t", cli.CreateOnly)
+	logger.Infof("  reimport_tables: %t", cli.ReimportTables)
+	if cli.ReimportTableFile != "" {
+		logger.Infof("  reimport_table_file: %s", cli.ReimportTableFile)
+	}
 	logger.Infof("  dry_run: %t", cli.DryRun)
 	if cli.RemovePostfix != "" {
 		logger.Infof("  remove_postfix: %s", cli.RemovePostfix)

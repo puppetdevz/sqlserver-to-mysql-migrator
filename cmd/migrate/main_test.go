@@ -14,6 +14,7 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/tablescope"
 )
 
 func TestCSVNotFoundShouldAdvanceOverallSkip(t *testing.T) {
@@ -190,26 +191,6 @@ func TestFinalizeCreateOnlyProgressMarksExistingTablesAsSkipped(t *testing.T) {
 	}
 }
 
-func TestFilterTablesCaseSensitive(t *testing.T) {
-	tableMatcher := matcher.NewTableNameMatcher(true)
-
-	got := filterTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
-
-	if len(got) != 0 {
-		t.Fatalf("filterTables() = %v, want empty", got)
-	}
-}
-
-func TestFilterTablesCaseInsensitive(t *testing.T) {
-	tableMatcher := matcher.NewTableNameMatcher(false)
-
-	got := filterTables([]string{"SAMPLE_MAIN_102"}, []string{"sample_main_102"}, tableMatcher)
-
-	if len(got) != 1 || got[0] != "SAMPLE_MAIN_102" {
-		t.Fatalf("filterTables() = %v, want [SAMPLE_MAIN_102]", got)
-	}
-}
-
 func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *testing.T) {
 	allDDLs := map[string]*parser.TableDDL{
 		"SAMPLE_MAIN_101$": {TableName: "sample_main_101$"},
@@ -217,7 +198,6 @@ func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *te
 		"ADDRESSBOOK":    {TableName: "ADDRESSBOOK"},
 		"AGENT":          {TableName: "agent"},
 	}
-	tableMatcher := matcher.NewTableNameMatcher(true)
 
 	tableNames := collectDDLTableNames(allDDLs)
 	want := []string{"ADDRESSBOOK", "agent", "sample_main_101$"}
@@ -228,11 +208,6 @@ func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *te
 		if tableNames[i] != want[i] {
 			t.Fatalf("collectDDLTableNames() = %v, want %v", tableNames, want)
 		}
-	}
-
-	got := filterTables(tableNames, []string{"sample_main_101$"}, tableMatcher)
-	if len(got) != 1 || got[0] != "sample_main_101$" {
-		t.Fatalf("filterTables() = %v, want [sample_main_101$]", got)
 	}
 }
 
@@ -477,7 +452,7 @@ func TestExcludeTablesRemovesAllFailedTables(t *testing.T) {
 	allTables := []string{"TABLE_A", "TABLE_B", "TABLE_C", "TABLE_D"}
 	failedTables := []string{"TABLE_A", "TABLE_C"} // A 和 C 建表失败
 
-	kept := excludeTables(allTables, failedTables, tableMatcher)
+	kept := tablescope.ExcludeTables(allTables, failedTables, tableMatcher)
 
 	if len(kept) != 2 {
 		t.Fatalf("kept = %d, want 2", len(kept))
@@ -491,7 +466,7 @@ func TestExcludeTablesEmptyFailedList(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(false)
 	allTables := []string{"A", "B", "C"}
 
-	kept := excludeTables(allTables, nil, tableMatcher)
+	kept := tablescope.ExcludeTables(allTables, nil, tableMatcher)
 	if len(kept) != 3 {
 		t.Fatalf("kept = %d, want 3", len(kept))
 	}

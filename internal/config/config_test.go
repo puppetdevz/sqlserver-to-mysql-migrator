@@ -17,6 +17,7 @@ func writeConfigForTest(t *testing.T, body string) string {
 	return path
 }
 
+
 func TestTableNameCaseSensitiveDefaultsToTrueWhenOmitted(t *testing.T) {
 	path := writeConfigForTest(t, `
 source:
@@ -45,6 +46,7 @@ logging:
 	}
 }
 
+
 func TestGetDSNInitializesNetworkTimeoutsPerConnection(t *testing.T) {
 	cfg := TargetConfig{
 		Host:         "127.0.0.1",
@@ -70,6 +72,7 @@ func TestGetDSNInitializesNetworkTimeoutsPerConnection(t *testing.T) {
 		}
 	}
 }
+
 
 func TestTableNameCaseSensitivePreservesExplicitFalse(t *testing.T) {
 	path := writeConfigForTest(t, `
@@ -100,6 +103,7 @@ logging:
 	}
 }
 
+
 func TestCSVHasHeaderDefaultsToTrue(t *testing.T) {
 	path := writeConfigForTest(t, `
 source:
@@ -127,6 +131,7 @@ logging:
 		t.Fatal("CSVHasHeader = nil or false, want true when omitted")
 	}
 }
+
 
 func TestFastFailDefaultsToTrue(t *testing.T) {
 	path := writeConfigForTest(t, `
@@ -156,6 +161,63 @@ logging:
 	}
 }
 
+func TestCountCSVRowsBeforeImportDefaultsToTrue(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  batch_size: 100
+  max_workers: 1
+  on_duplicate: "replace"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Migration.ShouldCountCSVRowsBeforeImport() {
+		t.Fatal("ShouldCountCSVRowsBeforeImport() = false, want true when omitted")
+	}
+}
+
+func TestCountCSVRowsBeforeImportPreservesExplicitFalse(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  count_csv_rows_before_import: false
+  batch_size: 100
+  max_workers: 1
+  on_duplicate: "replace"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Migration.ShouldCountCSVRowsBeforeImport() {
+		t.Fatal("ShouldCountCSVRowsBeforeImport() = true, want false when explicitly configured")
+	}
+}
+
 func TestLoadWithoutLocalConfig(t *testing.T) {
 	path := writeConfigForTest(t, `
 source:
@@ -182,6 +244,7 @@ logging:
 		t.Fatalf("Target.Host = %s, want localhost", cfg.Target.Host)
 	}
 }
+
 
 func TestLoadWithLocalScalarOverride(t *testing.T) {
 	base := writeConfigForTest(t, `
@@ -225,6 +288,7 @@ target:
 	}
 }
 
+
 func TestLoadWithLocalSliceReplace(t *testing.T) {
 	base := writeConfigForTest(t, `
 source:
@@ -261,6 +325,7 @@ migration:
 		t.Fatalf("SkipTables = %v, want [table_c] (replaced, not merged)", cfg.Migration.SkipTables)
 	}
 }
+
 
 func TestLoadWithLocalNestedMerge(t *testing.T) {
 	base := writeConfigForTest(t, `
@@ -314,6 +379,7 @@ converter:
 		t.Fatalf("Converter.MaxVarcharToTextSize = %d, want 300", cfg.Converter.MaxVarcharToTextSize)
 	}
 }
+
 
 func TestLoadBaseConfigNotFound(t *testing.T) {
 	_, err := Load("nonexistent.yaml")

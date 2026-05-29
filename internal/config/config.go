@@ -43,6 +43,7 @@ type TargetConfig struct {
 type MigrationConfig struct {
 	FastFail               *bool    `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
 	TableNameCaseSensitive *bool    `yaml:"table_name_case_sensitive"`
+	CountCSVRowsBeforeImport *bool    `yaml:"count_csv_rows_before_import"`
 	BatchSize              int      `yaml:"batch_size"`
 	MaxWorkers             int      `yaml:"max_workers"`
 	OnDuplicate            string   `yaml:"on_duplicate"`       // "replace" or "ignore"
@@ -174,6 +175,14 @@ func (m MigrationConfig) IsFastFail() bool {
 	return *m.FastFail
 }
 
+// ShouldCountCSVRowsBeforeImport returns whether imports should pre-scan CSV files for progress totals.
+func (m MigrationConfig) ShouldCountCSVRowsBeforeImport() bool {
+	if m.CountCSVRowsBeforeImport == nil {
+		return true
+	}
+	return *m.CountCSVRowsBeforeImport
+}
+
 // IsCSVHasHeader returns the effective csv_has_header value.
 func (s SourceConfig) IsCSVHasHeader() bool {
 	if s.CSVHasHeader == nil {
@@ -238,6 +247,7 @@ func LogEffective(cfg *Config, cli CLIArgs) {
 	logger.Infof("  table_name_case_sensitive: %t", cfg.Migration.IsTableNameCaseSensitive())
 	logger.Infof("  batch_size: %d", cfg.Migration.BatchSize)
 	logger.Infof("  max_workers: %d", cfg.Migration.MaxWorkers)
+	logger.Infof("  count_csv_rows_before_import: %t", cfg.Migration.ShouldCountCSVRowsBeforeImport())
 	logger.Infof("  on_duplicate: %s", cfg.Migration.OnDuplicate)
 	logger.Infof("  max_rows_per_table: %d", cfg.Migration.MaxRowsPerTable)
 	if len(cfg.Migration.SkipTables) > 0 {

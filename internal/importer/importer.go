@@ -149,15 +149,6 @@ func (ti *TableImporter) countRowsForProgress(file *os.File) (int64, error) {
 	return counter(file)
 }
 
-// getDBColumns 获取数据库中表的列
-func (ti *TableImporter) getDBColumns(tableName string) ([]string, error) {
-	infos, err := ti.getDBColumnInfos(context.Background(), tableName)
-	if err != nil {
-		return nil, err
-	}
-	return columnNamesFromInfos(infos), nil
-}
-
 func (ti *TableImporter) getDBColumnInfos(ctx context.Context, tableName string) ([]dbColumnInfo, error) {
 	// 使用 DESCRIBE 获取列信息
 	query := fmt.Sprintf("DESCRIBE `%s`", tableName)
@@ -370,9 +361,9 @@ func isTemporalValue(value string) bool {
 }
 
 // filterRowData 过滤行数据，只保留有效的列（根据 mapping 映射）
-// 支持 []string 和 []interface{} 两种输入类型
-func filterRowData(row []any, mapping []int) []interface{} {
-	result := make([]interface{}, 0, len(mapping))
+// 支持 []string 和 []any 两种输入类型
+func filterRowData(row []any, mapping []int) []any {
+	result := make([]any, 0, len(mapping))
 	for i, mappedIdx := range mapping {
 		if mappedIdx < 0 {
 			continue
@@ -395,7 +386,7 @@ type batchResult struct {
 }
 
 type batchInserter interface {
-	InsertBatch(rows [][]interface{}) (int64, error)
+	InsertBatch(rows [][]any) (int64, error)
 }
 
 type adaptiveBatchInsertResult struct {
@@ -419,7 +410,7 @@ func insertBatchWithAdaptiveRetry(
 	inserter batchInserter,
 	tableName string,
 	batchNum int,
-	rows [][]interface{},
+	rows [][]any,
 	wait func(time.Duration) error,
 ) adaptiveBatchInsertResult {
 	if wait == nil {
@@ -435,7 +426,7 @@ func insertBatchWithAdaptiveRetryDepth(
 	inserter batchInserter,
 	tableName string,
 	batchNum int,
-	rows [][]interface{},
+	rows [][]any,
 	wait func(time.Duration) error,
 	depth int,
 ) adaptiveBatchInsertResult {
@@ -677,7 +668,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 
 	// 建立流水线：CSV读取 -> 预处理 -> 数据库插入
 	type batchData struct {
-		rows     [][]interface{}
+		rows     [][]any
 		batchNum int
 		err      error
 	}
@@ -783,7 +774,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			}
 
 			// 预处理数据（转换类型，并过滤掉无效列）
-			processedBatch := make([][]interface{}, len(batch))
+			processedBatch := make([][]any, len(batch))
 			for i, row := range batch {
 				// 先类型转换，再过滤
 				repairedRow := repairDelimitedRow(row, rowColumnInfos)
@@ -1006,7 +997,7 @@ func (er *ErrorRecorder) RecordError(tableName, sql string, rowData []string, er
 }
 
 // RecordBatchError 记录批次错误
-func (er *ErrorRecorder) RecordBatchError(tableName string, batchNum int, rows [][]interface{}, err error) {
+func (er *ErrorRecorder) RecordBatchError(tableName string, batchNum int, rows [][]any, err error) {
 	if !er.enabled {
 		return
 	}
@@ -1231,8 +1222,8 @@ func (di *DataImporter) ImportTables(tableNames []string) ([]*ImportResult, erro
 }
 
 // PreprocessRow 预处理行数据
-func PreprocessRow(row []string) []interface{} {
-	processed := make([]interface{}, len(row))
+func PreprocessRow(row []string) []any {
+	processed := make([]any, len(row))
 	for i, value := range row {
 		value = normalizeCSVString(value)
 		// 空字符串转换为 NULL

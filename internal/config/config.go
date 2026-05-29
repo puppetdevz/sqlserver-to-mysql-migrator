@@ -41,15 +41,16 @@ type TargetConfig struct {
 
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
-	FastFail               *bool    `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
-	TableNameCaseSensitive *bool    `yaml:"table_name_case_sensitive"`
-	CountCSVRowsBeforeImport *bool    `yaml:"count_csv_rows_before_import"`
-	BatchSize              int      `yaml:"batch_size"`
-	MaxWorkers             int      `yaml:"max_workers"`
-	OnDuplicate            string   `yaml:"on_duplicate"`       // "replace" or "ignore"
-	MaxRowsPerTable        int      `yaml:"max_rows_per_table"` // 每表最大导入行数，0 表示不限制
-	SkipTables             []string `yaml:"skip_tables"`        // 要跳过的表名列表
-	MaxBatchBytes          int      `yaml:"max_batch_bytes"`    // 单批次最大字节数（估算），默认 32MB
+	FastFail                  *bool    `yaml:"fast_fail"`                       // 遇错即停（true）或记录错误跳过（false）
+	TableNameCaseSensitive    *bool    `yaml:"table_name_case_sensitive"`
+	CountCSVRowsBeforeImport  *bool    `yaml:"count_csv_rows_before_import"`
+	BatchSize                 int      `yaml:"batch_size"`
+	MaxWorkers                int      `yaml:"max_workers"`
+	OnDuplicate               string   `yaml:"on_duplicate"`                     // "replace" or "ignore"
+	MaxRowsPerTable           int      `yaml:"max_rows_per_table"`               // 每表最大导入行数，0 表示不限制
+	SkipTables                []string `yaml:"skip_tables"`                      // 要跳过的表名列表
+	MaxBatchBytes             int      `yaml:"max_batch_bytes"`                  // 单批次最大字节数（估算），默认 32MB
+	SlowTableThresholdMinutes int      `yaml:"slow_table_threshold_minutes"`     // 慢表耗时阈值（分钟），默认 15
 }
 
 // LoggingConfig 日志配置
@@ -201,6 +202,15 @@ func (m MigrationConfig) EffectiveMaxBatchBytes() string {
 		return "33554432 (default)"
 	}
 	return fmt.Sprintf("%d", m.MaxBatchBytes)
+}
+
+// EffectiveSlowTableThresholdMinutes returns the effective slow-table threshold in minutes.
+// 0 or negative → default 15.
+func (m MigrationConfig) EffectiveSlowTableThresholdMinutes() int {
+	if m.SlowTableThresholdMinutes <= 0 {
+		return 15
+	}
+	return m.SlowTableThresholdMinutes
 }
 
 // CLIArgs holds CLI flag values for diagnostic logging.

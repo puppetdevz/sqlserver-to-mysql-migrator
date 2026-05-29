@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -943,5 +944,105 @@ func TestCountRowsForProgressUsesCounterByDefault(t *testing.T) {
 	}
 	if got != 42 {
 		t.Fatalf("countRowsForProgress() = %d, want 42", got)
+	}
+}
+
+type scriptedInsertResult struct {
+	affected int64
+	err      error
+}
+
+type scriptedBatchInserter struct {
+	results      []scriptedInsertResult
+	calls        []int
+	lastErr      error
+	lastAffected int64
+}
+
+func (s *scriptedBatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
+	s.calls = append(s.calls, len(rows))
+	if len(s.results) == 0 {
+		return 0, s.lastErr
+	}
+	result := s.results[0]
+	s.results = s.results[1:]
+	s.lastErr = result.err
+	if result.err != nil {
+		s.lastAffected = result.affected
+	}
+	return result.affected, result.err
+}
+
+func noRetryWait(time.Duration) error {
+	return nil
+}
+
+func TestAdaptiveBatchInsertRetriesOriginalBatchBeforeSplit(t *testing.T) {
+	inserter := &scriptedBatchInserter{
+		results: []scriptedInsertResult{
+			{err: driver.ErrBadConn},
+			{err: driver.ErrBadConn},
+			{affected: 2},
+			{affected: 2},
+		},
+	}
+	rows := [][]interface{}{{1}, {2}, {3}, {4}}
+
+	result := insertBatchWithAdaptiveRetry(context.Background(), inserter, "orders", 3, rows, noRetryWait)
+
+	if result.err != nil {
+		t.Fatalf("insertBatchWithAdaptiveRetry() error = %v", result.err)
+	}
+	if result.affectedRows != 4 {
+		t.Fatalf("affectedRows = %d, want 4", result.affectedRows)
+	}
+	if result.retries != 1 {
+		t.Fatalf("retries = %d, want 1 same-size retry before split", result.retries)
+	}
+	if !result.split {
+		t.Fatal("split = false, want true after repeated connection error")
+	}
+	wantCalls := []int{4, 4, 2, 2}
+	if !reflect.DeepEqual(inserter.calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", inserter.calls, wantCalls)
+	}
+}
+
+func TestAdaptiveBatchInsertDoesNotSplitDataErrors(t *testing.T) {
+	dataErr := fmt.Errorf("data too long for column 'NAME'")
+	inserter := &scriptedBatchInserter{
+		results: []scriptedInsertResult{{err: dataErr}},
+	}
+	rows := [][]interface{}{{1}, {2}, {3}, {4}}
+
+	result := insertBatchWithAdaptiveRetry(context.Background(), inserter, "orders", 3, rows, noRetryWait)
+
+	if result.err == nil {
+		t.Fatal("expected data error")
+	}
+	if result.split {
+		t.Fatal("split = true, want false for data errors")
+	}
+	wantCalls := []int{4, 4, 4}
+	if !reflect.DeepEqual(inserter.calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", inserter.calls, wantCalls)
+	}
+}
+
+func TestAdaptiveBatchInsertReturnsContextErrorDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	inserter := &scriptedBatchInserter{
+		results: []scriptedInsertResult{{err: driver.ErrBadConn}},
+	}
+	rows := [][]interface{}{{1}, {2}}
+
+	result := insertBatchWithAdaptiveRetry(ctx, inserter, "orders", 3, rows, func(d time.Duration) error { return waitForRetry(ctx, d) })
+
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", result.err)
+	}
+	if result.split {
+		t.Fatal("split = true, want false when context cancels before retry")
 	}
 }

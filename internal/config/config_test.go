@@ -17,7 +17,6 @@ func writeConfigForTest(t *testing.T, body string) string {
 	return path
 }
 
-
 func TestTableNameCaseSensitiveDefaultsToTrueWhenOmitted(t *testing.T) {
 	path := writeConfigForTest(t, `
 source:
@@ -46,7 +45,6 @@ logging:
 	}
 }
 
-
 func TestGetDSNInitializesNetworkTimeoutsPerConnection(t *testing.T) {
 	cfg := TargetConfig{
 		Host:         "127.0.0.1",
@@ -72,7 +70,6 @@ func TestGetDSNInitializesNetworkTimeoutsPerConnection(t *testing.T) {
 		}
 	}
 }
-
 
 func TestTableNameCaseSensitivePreservesExplicitFalse(t *testing.T) {
 	path := writeConfigForTest(t, `
@@ -103,7 +100,6 @@ logging:
 	}
 }
 
-
 func TestCSVHasHeaderDefaultsToTrue(t *testing.T) {
 	path := writeConfigForTest(t, `
 source:
@@ -131,7 +127,6 @@ logging:
 		t.Fatal("CSVHasHeader = nil or false, want true when omitted")
 	}
 }
-
 
 func TestFastFailDefaultsToTrue(t *testing.T) {
 	path := writeConfigForTest(t, `
@@ -245,7 +240,6 @@ logging:
 	}
 }
 
-
 func TestLoadWithLocalScalarOverride(t *testing.T) {
 	base := writeConfigForTest(t, `
 source:
@@ -288,7 +282,6 @@ target:
 	}
 }
 
-
 func TestLoadWithLocalSliceReplace(t *testing.T) {
 	base := writeConfigForTest(t, `
 source:
@@ -325,7 +318,6 @@ migration:
 		t.Fatalf("SkipTables = %v, want [table_c] (replaced, not merged)", cfg.Migration.SkipTables)
 	}
 }
-
 
 func TestLoadWithLocalNestedMerge(t *testing.T) {
 	base := writeConfigForTest(t, `
@@ -379,7 +371,6 @@ converter:
 		t.Fatalf("Converter.MaxVarcharToTextSize = %d, want 300", cfg.Converter.MaxVarcharToTextSize)
 	}
 }
-
 
 func TestLoadBaseConfigNotFound(t *testing.T) {
 	_, err := Load("nonexistent.yaml")

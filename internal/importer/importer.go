@@ -26,6 +26,7 @@ const (
 	maxConnectionRetries     = 8
 	connectionRetryBaseDelay = 1 * time.Second
 	maxConnectionRetryDelay  = 30 * time.Second
+	maxSplitDepth            = 8        // 递归分批最大深度
 	bufferSize               = 10       // 流水线缓冲区大小
 	bom                      = "\uFEFF" // UTF-8 BOM 字符
 )
@@ -438,17 +439,14 @@ func insertBatchWithAdaptiveRetryDepth(
 	wait func(time.Duration) error,
 	depth int,
 ) adaptiveBatchInsertResult {
-	var lastAffected int64
-
 	for retry := 0; ; retry++ {
 		affected, err := inserter.InsertBatch(rows)
-		lastAffected = affected
 		if err == nil {
 			return adaptiveBatchInsertResult{affectedRows: affected, retries: retry}
 		}
 
 		attempts, baseDelay := batchRetryPolicy(err)
-		canSplit := isRetryableConnectionError(err) && retry >= 1 && len(rows) > 1
+		canSplit := isRetryableConnectionError(err) && retry >= 1 && len(rows) > 1 && depth < maxSplitDepth
 		if canSplit {
 			mid := len(rows) / 2
 			logger.Warnf("Connection retry batch split: table=%s batch=%d rows=%d split_rows=%d/%d reason=%v",
@@ -469,14 +467,14 @@ func insertBatchWithAdaptiveRetryDepth(
 		}
 
 		if retry+1 >= attempts {
-			return adaptiveBatchInsertResult{affectedRows: lastAffected, retries: retry, err: err}
+			return adaptiveBatchInsertResult{retries: retry, err: err}
 		}
 
 		delay := batchRetryDelay(retry+1, baseDelay, maxConnectionRetryDelay)
 		logger.Warnf("Retry %d/%d for batch %d in table %s after %s: %v",
 			retry+1, attempts, batchNum, tableName, delay, err)
 		if waitErr := wait(delay); waitErr != nil {
-			return adaptiveBatchInsertResult{affectedRows: lastAffected, retries: retry, err: waitErr}
+			return adaptiveBatchInsertResult{retries: retry, err: waitErr}
 		}
 	}
 }
@@ -691,7 +689,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	aggregatorDone := make(chan struct{})
 
 	// fast_fail 配置（闭包捕获，无需锁）
-	fastFail := ti.cfg.Migration.FastFail == nil || *ti.cfg.Migration.FastFail
+	fastFail := ti.cfg.Migration.IsFastFail()
 
 	var totalRows int64
 	var processedRows int64
@@ -834,40 +832,32 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				continue
 			}
 
-		result := insertBatchWithAdaptiveRetry(safeCtx, inserter, ti.tableName, bd.batchNum, bd.rows, nil)
-		affected := result.affectedRows
-		insertErr := result.err
-			logger.Debugf("[DB Writer] Batch %d stats: rows=%d estimated_bytes=%d retries=%d split=%t duration=%.1fs",
-			bd.batchNum,
-			len(bd.rows),
-			estimateBatchBytes(bd.rows),
-			result.retries,
-			result.split,
-			time.Since(batchStart).Seconds(),
-			)
+			result := insertBatchWithAdaptiveRetry(safeCtx, inserter, ti.tableName, bd.batchNum, bd.rows, nil)
+			affected := result.affectedRows
+			insertErr := result.err
 
 			// 发送结果到 resultChan
 			resultChan <- batchResult{
-			batchNum:     bd.batchNum,
-			rowCount:     len(bd.rows),
-			affectedRows: affected,
-			err:          insertErr,
+				batchNum:     bd.batchNum,
+				rowCount:     len(bd.rows),
+				affectedRows: affected,
+				err:          insertErr,
 			}
 
 			if insertErr != nil {
-			if diagnostic := databaseCapacityDiagnostic(ti.tableName, bd.batchNum, insertErr); diagnostic != "" {
-				logger.Errorf("%s", diagnostic)
-				insertErr = fmt.Errorf("%s: %w", diagnostic, insertErr)
-			}
-			ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
-			logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, result.retries, insertErr)
-			if fastFail {
-				csvDoneOnce.Do(func() { close(csvDone) })
-			}
+				if diagnostic := databaseCapacityDiagnostic(ti.tableName, bd.batchNum, insertErr); diagnostic != "" {
+					logger.Errorf("%s", diagnostic)
+					insertErr = fmt.Errorf("%s: %w", diagnostic, insertErr)
+				}
+				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
+				logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, result.retries, insertErr)
+				if fastFail {
+					csvDoneOnce.Do(func() { close(csvDone) })
+				}
 			} else {
-			totalInserted += affected
-			logger.Debugf("[DB Writer] Batch %d: %d rows inserted, took %.1fs, totalInserted=%d",
-				bd.batchNum, affected, time.Since(batchStart).Seconds(), totalInserted)
+				totalInserted += affected
+				logger.Debugf("[DB Writer] Batch %d: %d rows inserted, estimated_bytes=%d retries=%d split=%t duration=%.1fs totalInserted=%d",
+					bd.batchNum, affected, estimateBatchBytes(bd.rows), result.retries, result.split, time.Since(batchStart).Seconds(), totalInserted)
 			}
 		}
 	}()

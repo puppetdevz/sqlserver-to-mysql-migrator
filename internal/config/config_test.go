@@ -378,3 +378,92 @@ func TestLoadBaseConfigNotFound(t *testing.T) {
 		t.Fatal("Load() should return error for nonexistent base config")
 	}
 }
+
+func TestSlowTableThresholdMinutesDefaultsTo15(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  batch_size: 100
+  max_workers: 1
+  on_duplicate: "replace"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Migration.EffectiveSlowTableThresholdMinutes() != 15 {
+		t.Fatalf("EffectiveSlowTableThresholdMinutes() = %d, want 15 when omitted",
+			cfg.Migration.EffectiveSlowTableThresholdMinutes())
+	}
+}
+
+func TestSlowTableThresholdMinutesPreservesExplicitValue(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  slow_table_threshold_minutes: 30
+  batch_size: 100
+  max_workers: 1
+  on_duplicate: "replace"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Migration.EffectiveSlowTableThresholdMinutes() != 30 {
+		t.Fatalf("EffectiveSlowTableThresholdMinutes() = %d, want 30",
+			cfg.Migration.EffectiveSlowTableThresholdMinutes())
+	}
+}
+
+func TestSlowTableThresholdMinutesZeroReturnsDefault(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  slow_table_threshold_minutes: 0
+  batch_size: 100
+  max_workers: 1
+  on_duplicate: "replace"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Migration.EffectiveSlowTableThresholdMinutes() != 15 {
+		t.Fatalf("EffectiveSlowTableThresholdMinutes() = %d, want 15 when zero",
+			cfg.Migration.EffectiveSlowTableThresholdMinutes())
+	}
+}

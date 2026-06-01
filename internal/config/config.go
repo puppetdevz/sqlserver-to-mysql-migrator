@@ -39,18 +39,31 @@ type TargetConfig struct {
 	ReadTimeout     int    `yaml:"read_timeout"`      // 秒，默认 30s
 }
 
+// AdaptiveImportConfig controls weighted scheduling for large CSV imports.
+type AdaptiveImportConfig struct {
+	Enabled               *bool `yaml:"enabled"`
+	ImportTokens          int   `yaml:"import_tokens"`
+	MinTokens             int   `yaml:"min_tokens"`
+	LargeTableMB          int   `yaml:"large_table_mb"`
+	HugeTableMB           int   `yaml:"huge_table_mb"`
+	SlowBatchSeconds      int   `yaml:"slow_batch_seconds"`
+	RecoveryWindowSeconds int   `yaml:"recovery_window_seconds"`
+}
+
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
-	FastFail                  *bool    `yaml:"fast_fail"`                       // 遇错即停（true）或记录错误跳过（false）
-	TableNameCaseSensitive    *bool    `yaml:"table_name_case_sensitive"`
-	CountCSVRowsBeforeImport  *bool    `yaml:"count_csv_rows_before_import"`
-	BatchSize                 int      `yaml:"batch_size"`
-	MaxWorkers                int      `yaml:"max_workers"`
-	OnDuplicate               string   `yaml:"on_duplicate"`                     // "replace" or "ignore"
-	MaxRowsPerTable           int      `yaml:"max_rows_per_table"`               // 每表最大导入行数，0 表示不限制
-	SkipTables                []string `yaml:"skip_tables"`                      // 要跳过的表名列表
-	MaxBatchBytes             int      `yaml:"max_batch_bytes"`                  // 单批次最大字节数（估算），默认 32MB
-	SlowTableThresholdMinutes int      `yaml:"slow_table_threshold_minutes"`     // 慢表耗时阈值（分钟），默认 15
+	FastFail                  *bool                `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
+	TableNameCaseSensitive    *bool                `yaml:"table_name_case_sensitive"`
+	CountCSVRowsBeforeImport  *bool                `yaml:"count_csv_rows_before_import"`
+	BatchSize                 int                  `yaml:"batch_size"`
+	MaxWorkers                int                  `yaml:"max_workers"`
+	AdaptiveImport            AdaptiveImportConfig `yaml:"adaptive_import"`
+	RowCountValidation        *bool                `yaml:"row_count_validation"`
+	OnDuplicate               string               `yaml:"on_duplicate"`                 // "replace" or "ignore"
+	MaxRowsPerTable           int                  `yaml:"max_rows_per_table"`           // 每表最大导入行数，0 表示不限制
+	SkipTables                []string             `yaml:"skip_tables"`                  // 要跳过的表名列表
+	MaxBatchBytes             int                  `yaml:"max_batch_bytes"`              // 单批次最大字节数（估算），默认 32MB
+	SlowTableThresholdMinutes int                  `yaml:"slow_table_threshold_minutes"` // 慢表耗时阈值（分钟），默认 15
 }
 
 // LoggingConfig 日志配置
@@ -184,6 +197,75 @@ func (m MigrationConfig) ShouldCountCSVRowsBeforeImport() bool {
 	return *m.CountCSVRowsBeforeImport
 }
 
+// ShouldUseAdaptiveImport returns whether weighted import scheduling is enabled.
+func (m MigrationConfig) ShouldUseAdaptiveImport() bool {
+	if m.AdaptiveImport.Enabled == nil {
+		return true
+	}
+	return *m.AdaptiveImport.Enabled
+}
+
+// EffectiveImportTokens returns the configured DB pressure budget.
+func (m MigrationConfig) EffectiveImportTokens() int {
+	if m.AdaptiveImport.ImportTokens <= 0 {
+		return 10
+	}
+	return m.AdaptiveImport.ImportTokens
+}
+
+// EffectiveMinImportTokens returns the lowest dynamic token ceiling.
+func (m MigrationConfig) EffectiveMinImportTokens() int {
+	importTokens := m.EffectiveImportTokens()
+	minTokens := m.AdaptiveImport.MinTokens
+	if minTokens <= 0 {
+		minTokens = 2
+	}
+	if minTokens > importTokens {
+		return importTokens
+	}
+	return minTokens
+}
+
+// EffectiveLargeTableMB returns the CSV size threshold for large tables.
+func (m MigrationConfig) EffectiveLargeTableMB() int {
+	if m.AdaptiveImport.LargeTableMB <= 0 {
+		return 1024
+	}
+	return m.AdaptiveImport.LargeTableMB
+}
+
+// EffectiveHugeTableMB returns the CSV size threshold for huge tables.
+func (m MigrationConfig) EffectiveHugeTableMB() int {
+	if m.AdaptiveImport.HugeTableMB <= 0 {
+		return 5120
+	}
+	return m.AdaptiveImport.HugeTableMB
+}
+
+// EffectiveSlowBatchSeconds returns the batch duration threshold for pressure signals.
+func (m MigrationConfig) EffectiveSlowBatchSeconds() int {
+	if m.AdaptiveImport.SlowBatchSeconds <= 0 {
+		return 10
+	}
+	return m.AdaptiveImport.SlowBatchSeconds
+}
+
+// EffectiveRecoveryWindowSeconds returns the stable period needed before token recovery.
+func (m MigrationConfig) EffectiveRecoveryWindowSeconds() int {
+	if m.AdaptiveImport.RecoveryWindowSeconds <= 0 {
+		return 60
+	}
+	return m.AdaptiveImport.RecoveryWindowSeconds
+}
+
+// ShouldValidateRowCount returns whether successful imports should be checked with COUNT(*).
+func (m MigrationConfig) ShouldValidateRowCount() bool {
+	if m.RowCountValidation == nil {
+		return true
+	}
+	return *m.RowCountValidation
+}
+
 // IsCSVHasHeader returns the effective csv_has_header value.
 func (s SourceConfig) IsCSVHasHeader() bool {
 	if s.CSVHasHeader == nil {
@@ -257,6 +339,14 @@ func LogEffective(cfg *Config, cli CLIArgs) {
 	logger.Infof("  table_name_case_sensitive: %t", cfg.Migration.IsTableNameCaseSensitive())
 	logger.Infof("  batch_size: %d", cfg.Migration.BatchSize)
 	logger.Infof("  max_workers: %d", cfg.Migration.MaxWorkers)
+	logger.Infof("  adaptive_import.enabled: %t", cfg.Migration.ShouldUseAdaptiveImport())
+	logger.Infof("  adaptive_import.import_tokens: %d", cfg.Migration.EffectiveImportTokens())
+	logger.Infof("  adaptive_import.min_tokens: %d", cfg.Migration.EffectiveMinImportTokens())
+	logger.Infof("  adaptive_import.large_table_mb: %d", cfg.Migration.EffectiveLargeTableMB())
+	logger.Infof("  adaptive_import.huge_table_mb: %d", cfg.Migration.EffectiveHugeTableMB())
+	logger.Infof("  adaptive_import.slow_batch_seconds: %d", cfg.Migration.EffectiveSlowBatchSeconds())
+	logger.Infof("  adaptive_import.recovery_window_seconds: %d", cfg.Migration.EffectiveRecoveryWindowSeconds())
+	logger.Infof("  row_count_validation: %t", cfg.Migration.ShouldValidateRowCount())
 	logger.Infof("  count_csv_rows_before_import: %t", cfg.Migration.ShouldCountCSVRowsBeforeImport())
 	logger.Infof("  on_duplicate: %s", cfg.Migration.OnDuplicate)
 	logger.Infof("  max_rows_per_table: %d", cfg.Migration.MaxRowsPerTable)

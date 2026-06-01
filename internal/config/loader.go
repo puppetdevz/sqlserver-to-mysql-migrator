@@ -123,6 +123,9 @@ func validate(cfg *Config) error {
 	if cfg.Migration.OnDuplicate != "replace" && cfg.Migration.OnDuplicate != "ignore" {
 		return fmt.Errorf("migration.on_duplicate must be 'replace' or 'ignore'")
 	}
+	if cfg.Migration.EffectiveHugeTableMB() < cfg.Migration.EffectiveLargeTableMB() {
+		return fmt.Errorf("migration.adaptive_import.huge_table_mb must be greater than or equal to migration.adaptive_import.large_table_mb")
+	}
 
 	// 验证日志配置
 	if cfg.Logging.Level == "" {

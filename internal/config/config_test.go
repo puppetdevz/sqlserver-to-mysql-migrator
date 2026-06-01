@@ -467,3 +467,155 @@ logging:
 			cfg.Migration.EffectiveSlowTableThresholdMinutes())
 	}
 }
+
+func TestAdaptiveImportDefaults(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  batch_size: 100
+  max_workers: 4
+  on_duplicate: "ignore"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Migration.ShouldUseAdaptiveImport() {
+		t.Fatal("ShouldUseAdaptiveImport() = false, want true by default")
+	}
+	if got := cfg.Migration.EffectiveImportTokens(); got != 10 {
+		t.Fatalf("EffectiveImportTokens() = %d, want 10", got)
+	}
+	if got := cfg.Migration.EffectiveMinImportTokens(); got != 2 {
+		t.Fatalf("EffectiveMinImportTokens() = %d, want 2", got)
+	}
+	if got := cfg.Migration.EffectiveLargeTableMB(); got != 1024 {
+		t.Fatalf("EffectiveLargeTableMB() = %d, want 1024", got)
+	}
+	if got := cfg.Migration.EffectiveHugeTableMB(); got != 5120 {
+		t.Fatalf("EffectiveHugeTableMB() = %d, want 5120", got)
+	}
+	if got := cfg.Migration.EffectiveSlowBatchSeconds(); got != 10 {
+		t.Fatalf("EffectiveSlowBatchSeconds() = %d, want 10", got)
+	}
+	if got := cfg.Migration.EffectiveRecoveryWindowSeconds(); got != 60 {
+		t.Fatalf("EffectiveRecoveryWindowSeconds() = %d, want 60", got)
+	}
+	if !cfg.Migration.ShouldValidateRowCount() {
+		t.Fatal("ShouldValidateRowCount() = false, want true by default")
+	}
+}
+
+func TestAdaptiveImportExplicitConfig(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  adaptive_import:
+    enabled: false
+    import_tokens: 7
+    min_tokens: 3
+    large_table_mb: 2048
+    huge_table_mb: 8192
+    slow_batch_seconds: 15
+    recovery_window_seconds: 90
+  row_count_validation: false
+  batch_size: 100
+  max_workers: 4
+  on_duplicate: "ignore"
+logging:
+  level: "INFO"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Migration.ShouldUseAdaptiveImport() {
+		t.Fatal("ShouldUseAdaptiveImport() = true, want false")
+	}
+	if got := cfg.Migration.EffectiveImportTokens(); got != 7 {
+		t.Fatalf("EffectiveImportTokens() = %d, want 7", got)
+	}
+	if got := cfg.Migration.EffectiveMinImportTokens(); got != 3 {
+		t.Fatalf("EffectiveMinImportTokens() = %d, want 3", got)
+	}
+	if got := cfg.Migration.EffectiveLargeTableMB(); got != 2048 {
+		t.Fatalf("EffectiveLargeTableMB() = %d, want 2048", got)
+	}
+	if got := cfg.Migration.EffectiveHugeTableMB(); got != 8192 {
+		t.Fatalf("EffectiveHugeTableMB() = %d, want 8192", got)
+	}
+	if got := cfg.Migration.EffectiveSlowBatchSeconds(); got != 15 {
+		t.Fatalf("EffectiveSlowBatchSeconds() = %d, want 15", got)
+	}
+	if got := cfg.Migration.EffectiveRecoveryWindowSeconds(); got != 90 {
+		t.Fatalf("EffectiveRecoveryWindowSeconds() = %d, want 90", got)
+	}
+	if cfg.Migration.ShouldValidateRowCount() {
+		t.Fatal("ShouldValidateRowCount() = true, want false")
+	}
+}
+
+func TestAdaptiveImportRejectsHugeTableSmallerThanLargeTable(t *testing.T) {
+	path := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  adaptive_import:
+    large_table_mb: 5120
+    huge_table_mb: 1024
+  batch_size: 100
+  max_workers: 4
+  on_duplicate: "ignore"
+logging:
+  level: "INFO"
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want invalid adaptive import threshold error")
+	}
+
+	want := "migration.adaptive_import.huge_table_mb must be greater than or equal to migration.adaptive_import.large_table_mb"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Load() error = %v, want it to contain %q", err, want)
+	}
+}
+
+func TestAdaptiveImportMinTokensClampedToImportTokens(t *testing.T) {
+	cfg := MigrationConfig{
+		AdaptiveImport: AdaptiveImportConfig{
+			ImportTokens: 2,
+			MinTokens:    8,
+		},
+	}
+
+	if got := cfg.EffectiveMinImportTokens(); got != 2 {
+		t.Fatalf("EffectiveMinImportTokens() = %d, want 2", got)
+	}
+}

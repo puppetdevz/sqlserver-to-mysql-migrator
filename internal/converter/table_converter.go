@@ -14,46 +14,21 @@ import (
 // 列被转为 TEXT 后仅占用此字节数，其余数据存储在溢出页中
 const textInlineOverheadBytes = 20
 
-// ConvertMode describes whether generated DDL used normal or aggressive row-size rules.
+// ConvertMode describes the generated DDL conversion mode.
 type ConvertMode string
 
 const (
-	ConvertModeNormal     ConvertMode = "normal"
-	ConvertModeAggressive ConvertMode = "aggressive"
+	ConvertModeNormal ConvertMode = "normal"
 )
 
-// DegradationReason explains why a column was degraded to a wider off-page type.
-type DegradationReason string
-
-const (
-	DegradationReasonPredictedRowSize DegradationReason = "predicted_row_size"
-	DegradationReasonError1118        DegradationReason = "error1118"
-)
-
-// ConvertOptions controls row-size degradation behavior for DDL conversion.
-type ConvertOptions struct {
-	Mode                    ConvertMode
-	Reason                  DegradationReason
-	AllowNumericDegradation bool
-}
-
-// ColumnDegradation records one schema change made to reduce MySQL row size.
-type ColumnDegradation struct {
-	TableName            string
-	ColumnName           string
-	SourceType           string
-	TargetType           string
-	Reason               DegradationReason
-	EstimatedBytesBefore int
-	EstimatedBytesAfter  int
-}
+// ConvertOptions is reserved for future conversion options.
+type ConvertOptions struct{}
 
 // ConvertResult is the structured DDL conversion output used by migration code.
 type ConvertResult struct {
 	SQL               string
 	Mode              ConvertMode
 	EstimatedRowBytes int
-	Degradations      []ColumnDegradation
 }
 
 // TableConverter 表结构转换器
@@ -80,12 +55,9 @@ func (tc *TableConverter) ConvertToMySQL(tableDDL *parser.TableDDL) (string, err
 }
 
 // ConvertToMySQLResult converts SQL Server table DDL to MySQL and returns diagnostics.
-func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, opts ConvertOptions) (ConvertResult, error) {
-	if opts.Mode == "" {
-		opts.Mode = ConvertModeNormal
-	}
+func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, _ ConvertOptions) (ConvertResult, error) {
 	var ddl strings.Builder
-	result := ConvertResult{Mode: opts.Mode}
+	result := ConvertResult{Mode: ConvertModeNormal}
 
 	// CREATE TABLE
 	ddl.WriteString(fmt.Sprintf("CREATE TABLE `%s` (\n", tableDDL.TableName))
@@ -146,17 +118,6 @@ func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, opts C
 
 	initialEstimate := tc.estimateRowBytes(tableDDL, forceTextColumns)
 	result.EstimatedRowBytes = initialEstimate
-	allowNumeric := opts.AllowNumericDegradation || opts.Reason == DegradationReasonError1118
-	shouldAggressivelyDegrade := opts.Mode == ConvertModeAggressive || initialEstimate > tc.rowSizeSafeLimit()
-	if shouldAggressivelyDegrade {
-		if opts.Reason == "" {
-			opts.Reason = DegradationReasonPredictedRowSize
-		}
-		result.Mode = ConvertModeAggressive
-		degradations, estimatedBytes := tc.applyAggressiveDegradation(tableDDL, forceTextColumns, opts.Reason, allowNumeric)
-		result.Degradations = append(result.Degradations, degradations...)
-		result.EstimatedRowBytes = estimatedBytes
-	}
 
 	// 列定义
 	for i, column := range tableDDL.Columns {
@@ -204,7 +165,6 @@ func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, opts C
 	}
 
 	result.SQL = ddl.String()
-	result.EstimatedRowBytes = tc.estimateRowBytes(tableDDL, forceTextColumns)
 	return result, nil
 }
 
@@ -264,35 +224,6 @@ func (tc *TableConverter) extractType(typeDef string) string {
 	typeDef = strings.TrimSpace(typeDef)
 	typeDef = reTrimNullable.ReplaceAllString(typeDef, "")
 	return strings.TrimSpace(typeDef)
-}
-
-func (tc *TableConverter) applyAggressiveDegradation(
-	tableDDL *parser.TableDDL,
-	forceTextColumns map[string]bool,
-	reason DegradationReason,
-	allowNumeric bool,
-) ([]ColumnDegradation, int) {
-	estimatedBytes := tc.estimateRowBytes(tableDDL, forceTextColumns)
-	degradations := make([]ColumnDegradation, 0)
-
-	for _, candidate := range tc.aggressiveCandidates(tableDDL, forceTextColumns, allowNumeric) {
-		if estimatedBytes <= tc.rowSizeSafeLimit() {
-			break
-		}
-		before := estimatedBytes
-		forceTextColumns[candidate.name] = true
-		estimatedBytes -= (candidate.bytes - textInlineOverheadBytes)
-		degradations = append(degradations, ColumnDegradation{
-			TableName:            tableDDL.TableName,
-			ColumnName:           candidate.name,
-			SourceType:           candidate.sourceType,
-			TargetType:           "text",
-			Reason:               reason,
-			EstimatedBytesBefore: before,
-			EstimatedBytesAfter:  estimatedBytes,
-		})
-	}
-	return degradations, estimatedBytes
 }
 
 func (tc *TableConverter) estimatedInlineBytes(column parser.ColumnDef) (int, bool) {

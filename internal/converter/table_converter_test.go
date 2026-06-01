@@ -47,7 +47,7 @@ func TestConvertToMySQL_ThresholdConversion(t *testing.T) {
 		}
 	})
 
-	t.Run("6 varchar(300) cols below count threshold and row size guard, keep VARCHAR", func(t *testing.T) {
+	t.Run("6 varchar(300) cols below count threshold, keep VARCHAR", func(t *testing.T) {
 		cols := make([]parser.ColumnDef, 6)
 		for i := range cols {
 			cols[i] = parser.ColumnDef{
@@ -207,7 +207,7 @@ func TestConvertToMySQL_SizeThresholdConversion(t *testing.T) {
 	})
 }
 
-func TestConvertToMySQL_RowSizeGuardConvertsManyMediumVarchars(t *testing.T) {
+func TestConvertToMySQL_WideTableKeepsMediumVarcharsWithoutAggressiveGuard(t *testing.T) {
 	tc := NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  10,
 		MaxNvarcharToTextColumns: 10,
@@ -239,15 +239,18 @@ func TestConvertToMySQL_RowSizeGuardConvertsManyMediumVarchars(t *testing.T) {
 		t.Fatalf("ConvertToMySQL returned error: %v", err)
 	}
 	textCount := strings.Count(ddl, "` text")
-	if textCount < 160 {
-		t.Fatalf("DDL should convert most (169/180) nvarchar columns to text, got %d text columns:\n%s", textCount, ddl)
+	if textCount != 0 {
+		t.Fatalf("DDL should not convert nvarchar(100) columns to text due to estimated row size, got %d text columns:\n%s", textCount, ddl)
+	}
+	if !strings.Contains(ddl, "`field0` varchar(100) NULL") {
+		t.Fatalf("DDL should keep field0 as varchar(100), got:\n%s", ddl)
 	}
 	if !strings.Contains(ddl, "`ID` bigint NOT NULL") || !strings.Contains(ddl, "PRIMARY KEY (`ID`)") {
 		t.Fatalf("DDL should keep primary key column inline and indexed, got:\n%s", ddl)
 	}
 }
 
-func TestConvertToMySQL_RowSizeGuardKeepsIndexedColumnsInline(t *testing.T) {
+func TestConvertToMySQL_WideTableKeepsIndexedColumnsInline(t *testing.T) {
 	tc := NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  10,
 		MaxNvarcharToTextColumns: 10,
@@ -288,9 +291,12 @@ func TestConvertToMySQL_RowSizeGuardKeepsIndexedColumnsInline(t *testing.T) {
 	if !strings.Contains(ddl, "CREATE INDEX `IDX_indexed_code` ON `wide_table` (`indexed_code`);") {
 		t.Fatalf("DDL should keep index on indexed_code, got:\n%s", ddl)
 	}
+	if strings.Contains(ddl, "`field0` text") {
+		t.Fatalf("DDL should not convert unindexed medium fields to text due to estimated row size, got:\n%s", ddl)
+	}
 }
 
-func TestConvertToMySQL_RowSizeGuardWideTableLikeFormmain1980(t *testing.T) {
+func TestConvertToMySQL_WideTableLikeFormmain1980UsesOnlyConfiguredTextThresholds(t *testing.T) {
 	tc := NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  10,
 		MaxNvarcharToTextColumns: 10,
@@ -349,11 +355,14 @@ func TestConvertToMySQL_RowSizeGuardWideTableLikeFormmain1980(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConvertToMySQL returned error: %v", err)
 	}
-	// 98 large nvarchar (stage 1 size threshold) + 132 nvarchar(100) + 15 nvarchar(20)
-	// all converted to TEXT by row size guard = 245 total
+	// 98 large nvarchar columns are converted by configured size threshold.
+	// Medium nvarchar columns stay inline even if the estimated row size is wide.
 	textCount := strings.Count(ddl, "` text")
-	if textCount < 220 {
-		t.Fatalf("DDL should convert ~245 nvarchar columns to text, got %d text columns:\n%s", textCount, ddl)
+	if textCount != 98 {
+		t.Fatalf("DDL should convert only 98 size-threshold nvarchar columns to text, got %d text columns:\n%s", textCount, ddl)
+	}
+	if !strings.Contains(ddl, "`field0001` varchar(100) NULL") {
+		t.Fatalf("DDL should keep medium nvarchar columns inline, got:\n%s", ddl)
 	}
 	// Primary key should be preserved
 	if !strings.Contains(ddl, "`ID` bigint NOT NULL") {
@@ -394,9 +403,6 @@ func TestConvertToMySQLResultNormalModeReportsEstimate(t *testing.T) {
 	if result.EstimatedRowBytes <= 0 {
 		t.Fatalf("EstimatedRowBytes = %d, want > 0", result.EstimatedRowBytes)
 	}
-	if len(result.Degradations) != 0 {
-		t.Fatalf("Degradations = %+v, want empty", result.Degradations)
-	}
 }
 
 func TestConvertToMySQLCompatibilityWrapperReturnsSQL(t *testing.T) {
@@ -417,7 +423,7 @@ func TestConvertToMySQLCompatibilityWrapperReturnsSQL(t *testing.T) {
 	}
 }
 
-func TestConvertToMySQLResultPredictedRowSizeTriggersAggressiveStringDegradation(t *testing.T) {
+func TestConvertToMySQLResultPredictedRowSizeKeepsNormalConversion(t *testing.T) {
 	tc := NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
 		MaxNvarcharToTextColumns: 999,
@@ -445,21 +451,18 @@ func TestConvertToMySQLResultPredictedRowSizeTriggersAggressiveStringDegradation
 	if err != nil {
 		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
 	}
-	if result.Mode != ConvertModeAggressive {
-		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeAggressive)
+	if result.Mode != ConvertModeNormal {
+		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeNormal)
 	}
-	if len(result.Degradations) == 0 {
-		t.Fatal("Degradations is empty, want predicted row-size degradations")
+	if !strings.Contains(result.SQL, "`field0000` varchar(100) NULL") {
+		t.Fatalf("predicted row size should not force field0000 to text:\n%s", result.SQL)
 	}
-	if result.Degradations[0].Reason != DegradationReasonPredictedRowSize {
-		t.Fatalf("first degradation reason = %q, want %q", result.Degradations[0].Reason, DegradationReasonPredictedRowSize)
-	}
-	if strings.Contains(result.SQL, "`ID` text") {
-		t.Fatalf("primary key ID must not be degraded:\n%s", result.SQL)
+	if strings.Contains(result.SQL, "`field0000` text") {
+		t.Fatalf("predicted row size should not create text conversion:\n%s", result.SQL)
 	}
 }
 
-func TestConvertToMySQLResultKeepsIndexedColumnsInlineDuringAggressiveDegradation(t *testing.T) {
+func TestConvertToMySQLResultKeepsIndexedColumnsInlineWithoutEstimatedRowSizeConversion(t *testing.T) {
 	tc := NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
 		MaxNvarcharToTextColumns: 999,
@@ -491,6 +494,9 @@ func TestConvertToMySQLResultKeepsIndexedColumnsInlineDuringAggressiveDegradatio
 	if err != nil {
 		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
 	}
+	if result.Mode != ConvertModeNormal {
+		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeNormal)
+	}
 	if strings.Contains(result.SQL, "`indexed_code` text") {
 		t.Fatalf("indexed_code must remain inline:\n%s", result.SQL)
 	}
@@ -499,7 +505,7 @@ func TestConvertToMySQLResultKeepsIndexedColumnsInlineDuringAggressiveDegradatio
 	}
 }
 
-func TestConvertToMySQLResultAggressiveError1118AllowsNumericFallbackAfterStrings(t *testing.T) {
+func TestConvertToMySQLResultIgnoresAggressiveOptions(t *testing.T) {
 	tc := NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
 		MaxNvarcharToTextColumns: 999,
@@ -511,7 +517,7 @@ func TestConvertToMySQLResultAggressiveError1118AllowsNumericFallbackAfterString
 		{Name: "ID", Type: "bigint NOT NULL", Nullable: false},
 		{Name: "name", Type: "nvarchar(100) NULL", Nullable: true},
 	}
-	for i := 0; i < 700; i++ {
+	for i := 0; i < 20; i++ {
 		cols = append(cols, parser.ColumnDef{
 			Name:     fmt.Sprintf("amount%04d", i),
 			Type:     "numeric(20,4) NULL",
@@ -524,35 +530,17 @@ func TestConvertToMySQLResultAggressiveError1118AllowsNumericFallbackAfterString
 		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_wide_numeric", Columns: []string{"ID"}},
 	}
 
-	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{
-		Mode:                    ConvertModeAggressive,
-		Reason:                  DegradationReasonError1118,
-		AllowNumericDegradation: true,
-	})
+	result, err := tc.ConvertToMySQLResult(tableDDL, ConvertOptions{})
 	if err != nil {
 		t.Fatalf("ConvertToMySQLResult returned error: %v", err)
 	}
-
-	var firstNumericIndex = -1
-	var firstStringIndex = -1
-	for i, d := range result.Degradations {
-		if d.ColumnName == "name" {
-			firstStringIndex = i
-		}
-		if strings.HasPrefix(d.ColumnName, "amount") && firstNumericIndex == -1 {
-			firstNumericIndex = i
-		}
+	if result.Mode != ConvertModeNormal {
+		t.Fatalf("Mode = %q, want %q", result.Mode, ConvertModeNormal)
 	}
-	if firstStringIndex == -1 {
-		t.Fatalf("string degradation for name not found: %+v", result.Degradations)
+	if !strings.Contains(result.SQL, "`name` varchar(100) NULL") {
+		t.Fatalf("conversion should not force name to text:\n%s", result.SQL)
 	}
-	if firstNumericIndex == -1 {
-		t.Fatalf("numeric degradation not found: %+v", result.Degradations)
-	}
-	if firstNumericIndex < firstStringIndex {
-		t.Fatalf("numeric degradation happened before string degradation: %+v", result.Degradations)
-	}
-	if !strings.Contains(result.SQL, "`amount") || !strings.Contains(result.SQL, "` text NULL") {
-		t.Fatalf("expected numeric columns to be degraded to text:\n%s", result.SQL)
+	if !strings.Contains(result.SQL, "`amount0000` decimal(20,4) NULL") {
+		t.Fatalf("conversion should not force numeric columns to text:\n%s", result.SQL)
 	}
 }

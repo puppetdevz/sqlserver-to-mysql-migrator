@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func (f *fakeDDLExecutor) ExecuteDDL(ddl string) error {
 	return err
 }
 
-func TestCreateTableDDLWithRetryRetriesOnceOnMySQL1118(t *testing.T) {
+func TestCreateTableDDLDoesNotRetryOnMySQL1118(t *testing.T) {
 	tc := converter.NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
 		MaxNvarcharToTextColumns: 999,
@@ -80,30 +81,42 @@ func TestCreateTableDDLWithRetryRetriesOnceOnMySQL1118(t *testing.T) {
 		Columns:    cols,
 		PrimaryKey: &parser.PrimaryKeyDef{Name: "PK_retry_wide", Columns: []string{"ID"}},
 	}
+	rowSizeErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large"}
 	executor := &fakeDDLExecutor{
 		errs: []error{
-			fmt.Errorf("failed to execute DDL: %w", &mysql.MySQLError{Number: 1118, Message: "Row size too large"}),
+			fmt.Errorf("failed to execute DDL: %w", rowSizeErr),
 			nil,
 		},
 	}
 
-	result, err := createTableDDLWithRetry(executor, tc, tableDDL)
+	result, err := createTableDDL(executor, tc, tableDDL)
+	if err == nil {
+		t.Fatal("createTableDDL returned nil error, want first 1118 error")
+	}
+	if !errors.Is(err, rowSizeErr) {
+		t.Fatalf("errors.Is(err, rowSizeErr) = false, err = %v", err)
+	}
+	if len(executor.ddls) != 1 {
+		t.Fatalf("ExecuteDDL calls = %d, want 1", len(executor.ddls))
+	}
+	if result.Mode != converter.ConvertModeNormal {
+		t.Fatalf("Mode = %q, want %q", result.Mode, converter.ConvertModeNormal)
+	}
+}
+
+func TestWriteCreateFailedTablesWritesOneTablePerLine(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if err := writeCreateFailedTables([]string{"FORM_A", "FORM_B"}); err != nil {
+		t.Fatalf("writeCreateFailedTables() error = %v", err)
+	}
+
+	data, err := os.ReadFile(createFailedTablesFile)
 	if err != nil {
-		t.Fatalf("createTableDDLWithRetry returned error: %v", err)
+		t.Fatalf("ReadFile(%s) error = %v", createFailedTablesFile, err)
 	}
-	if len(executor.ddls) != 2 {
-		t.Fatalf("ExecuteDDL calls = %d, want 2", len(executor.ddls))
-	}
-	if result.Mode != converter.ConvertModeAggressive {
-		t.Fatalf("Mode = %q, want %q", result.Mode, converter.ConvertModeAggressive)
-	}
-	if len(result.Degradations) == 0 {
-		t.Fatal("retry result should include degradation records")
-	}
-	for _, degradation := range result.Degradations {
-		if degradation.Reason != converter.DegradationReasonError1118 {
-			t.Fatalf("degradation reason = %q, want %q", degradation.Reason, converter.DegradationReasonError1118)
-		}
+	if got, want := string(data), "FORM_A\nFORM_B\n"; got != want {
+		t.Fatalf("create failed table content = %q, want %q", got, want)
 	}
 }
 
@@ -329,10 +342,10 @@ func TestFinalErrorReportsAggregateWithoutStopCause(t *testing.T) {
 }
 
 // ============================================================================
-// Fix #8: createTableDDLWithRetry 错误包装使用 %w 使 errors.Is 能遍历整个链
+// Fix #8: createTableDDL 直接返回首次建表错误，保留 %w 错误链
 // ============================================================================
 
-func TestCreateTableDDLWithRetryDoubleWErrorWrapping(t *testing.T) {
+func TestCreateTableDDLReturnsFirstErrorWrapping(t *testing.T) {
 	tc := converter.NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
 		MaxNvarcharToTextColumns: 999,
@@ -357,42 +370,27 @@ func TestCreateTableDDLWithRetryDoubleWErrorWrapping(t *testing.T) {
 	}
 
 	rowSizeErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large"}
-	aggressiveErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large (after aggressive)"}
 
-	// 两次都失败：第一次 Error 1118 触发重试，第二次（aggressive）也失败
 	executor := &fakeDDLExecutor{
 		errs: []error{
 			fmt.Errorf("wrapped: %w", rowSizeErr),
-			fmt.Errorf("aggressive also failed: %w", aggressiveErr),
 		},
 	}
 
-	_, err := createTableDDLWithRetry(executor, tc, tableDDL)
+	_, err := createTableDDL(executor, tc, tableDDL)
 	if err == nil {
-		t.Fatal("expected error from createTableDDLWithRetry")
+		t.Fatal("expected error from createTableDDL")
 	}
 
-	// errors.Is 应该能遍历到 rowSizeErr（通过第一个 %w 包装）
 	if !errors.Is(err, rowSizeErr) {
-		t.Fatalf("errors.Is(err, rowSizeErr) = false, double %%w wrapping should preserve error chain. err = %v", err)
+		t.Fatalf("errors.Is(err, rowSizeErr) = false, %%w wrapping should preserve error chain. err = %v", err)
 	}
-
-	// errors.Is 也应该能遍历到 aggressiveErr（通过第二个 %w 包装）
-	if !errors.Is(err, aggressiveErr) {
-		t.Fatalf("errors.Is(err, aggressiveErr) = false, double %%w wrapping should preserve retry error. err = %v", err)
-	}
-
-	// 包装错误应同时包含两个错误的信息
-	errStr := err.Error()
-	if !strings.Contains(errStr, "row size error") {
-		t.Error("error should mention row size error")
-	}
-	if !strings.Contains(errStr, "aggressive") {
-		t.Error("error should mention aggressive retry failure")
+	if len(executor.ddls) != 1 {
+		t.Fatalf("ExecuteDDL calls = %d, want 1", len(executor.ddls))
 	}
 }
 
-func TestCreateTableDDLWithRetryAggressiveRetryErrorWrapping(t *testing.T) {
+func TestCreateTableDDLDoesNotConsumeSecondExecutorError(t *testing.T) {
 	tc := converter.NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
 		MaxNvarcharToTextColumns: 999,
@@ -417,28 +415,28 @@ func TestCreateTableDDLWithRetryAggressiveRetryErrorWrapping(t *testing.T) {
 	}
 
 	rowSizeErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large"}
-	aggressiveFailErr := &mysql.MySQLError{Number: 1118, Message: "Row size too large (after aggressive)"}
+	secondErr := errors.New("would only appear on retry")
 
 	executor := &fakeDDLExecutor{
 		errs: []error{
 			fmt.Errorf("wrapped: %w", rowSizeErr),
-			fmt.Errorf("aggressive also failed: %w", aggressiveFailErr),
+			secondErr,
 		},
 	}
 
-	_, err := createTableDDLWithRetry(executor, tc, tableDDL)
+	_, err := createTableDDL(executor, tc, tableDDL)
 	if err == nil {
-		t.Fatal("expected error from createTableDDLWithRetry")
+		t.Fatal("expected error from createTableDDL")
 	}
 
-	// errors.Is 应该能遍历到 rowSizeErr
 	if !errors.Is(err, rowSizeErr) {
-		t.Fatalf("errors.Is(err, rowSizeErr) = false, double %%w should preserve first error. err = %v", err)
+		t.Fatalf("errors.Is(err, rowSizeErr) = false, err = %v", err)
 	}
-
-	// errors.Is 也应该能遍历到 aggressiveFailErr
-	if !errors.Is(err, aggressiveFailErr) {
-		t.Fatalf("errors.Is(err, aggressiveFailErr) = false, double %%w should preserve retry error. err = %v", err)
+	if errors.Is(err, secondErr) {
+		t.Fatalf("errors.Is(err, secondErr) = true, retry error should not be consumed. err = %v", err)
+	}
+	if len(executor.ddls) != 1 {
+		t.Fatalf("ExecuteDDL calls = %d, want 1", len(executor.ddls))
 	}
 }
 
@@ -472,12 +470,11 @@ func TestExcludeTablesEmptyFailedList(t *testing.T) {
 	}
 }
 
-func TestCreateAndTrackTablesReturnsThreeValues(t *testing.T) {
-	// 编译时验证：createAndTrackTables 现在返回 ([]string, []string, error)
-	// 此测试确保 3 返回值签名在重构中不被意外破坏
+func TestCreateAndTrackTablesReturnsFailedTablesAndError(t *testing.T) {
+	// 编译时验证：createAndTrackTables 现在返回 ([]string, error)
 	var _ = func(cfg *config.Config, conn *database.Connection, missing []string,
 		ddl map[string]*parser.TableDDL, tracker *progress.Tracker,
-		mCtx *migration.MigrationContext, m matcher.TableNameMatcher) ([]string, []string, error) {
+		mCtx *migration.MigrationContext, m matcher.TableNameMatcher) ([]string, error) {
 		return createAndTrackTables(cfg, conn, missing, ddl, tracker, mCtx, m)
 	}
 }

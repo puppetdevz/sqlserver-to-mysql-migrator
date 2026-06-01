@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/converter"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
@@ -40,9 +38,9 @@ var (
 const (
 	Version = "1.0.0"
 
-	rowSizeFailedTablesFile = "row_size_failed_tables.txt"
-	completedTablesFile     = "completed_tables.txt"
-	slowTablesFile          = "slow_tables.txt"
+	createFailedTablesFile = "create_failed_tables.txt"
+	completedTablesFile    = "completed_tables.txt"
+	slowTablesFile         = "slow_tables.txt"
 )
 
 func logImportDiagnostic(diag *importer.ImportDiagnostic) {
@@ -265,19 +263,17 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 			logger.Infof("[DRY RUN]   - %s", tableName)
 		}
 	} else if len(classification.MissingTables) > 0 {
-		rowSizeFailed, allFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
+		createFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
 		if err != nil {
 			logger.Errorf("Some tables failed to create: %v", err)
 		}
-		if len(allFailed) > 0 {
-			if len(rowSizeFailed) > 0 {
-				if writeErr := writeRowSizeFailedTables(rowSizeFailed); writeErr != nil {
-					logger.Errorf("Failed to write row size failed tables file: %v", writeErr)
-				}
+		if len(createFailed) > 0 {
+			if writeErr := writeCreateFailedTables(createFailed); writeErr != nil {
+				logger.Errorf("Failed to write create failed tables file: %v", writeErr)
 			}
-			allTableNames = tablescope.ExcludeTables(allTableNames, allFailed, tableMatcher)
-			logger.Warnf("Excluded %d failed tables from subsequent phases (row_size: %d, other: %d): %v",
-				len(allFailed), len(rowSizeFailed), len(allFailed)-len(rowSizeFailed), allFailed)
+			allTableNames = tablescope.ExcludeTables(allTableNames, createFailed, tableMatcher)
+			logger.Warnf("Excluded %d create-failed tables from subsequent phases: %v",
+				len(createFailed), createFailed)
 		}
 	}
 
@@ -424,7 +420,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
-func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) (rowSizeFailed []string, allFailed []string, err error) {
+func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) (failed []string, err error) {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
 	tracker.StartPhase("create-missing-tables", len(missingTables))
@@ -438,7 +434,6 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	var totalFail atomic.Int64
 	var mu sync.Mutex
 	var failedTableNames []string
-	var rowSizeFailedTables []string
 
 	var wg sync.WaitGroup
 
@@ -480,37 +475,20 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 					failedTableNames = append(failedTableNames, tableName)
 					mu.Unlock()
 					totalFail.Add(1)
-
-					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-						migrationCtx.Stop(fmt.Errorf("table DDL not found: %s", tableName))
-						return
-					}
 					continue
 				}
 
 				// 执行 CREATE TABLE
 				logger.Infof("[Worker %d] Creating table: %s", workerID, tableName)
-				if _, err := createTableDDLWithRetry(conn, tableConverter, tableDDL); err != nil {
+				if _, err := createTableDDL(conn, tableConverter, tableDDL); err != nil {
 					logger.Errorf("[Worker %d] Failed to create table %s: %v", workerID, tableName, err)
 					tracker.FailTable(tableName, fmt.Sprintf("Table creation failed: %v", err))
 					tracker.FailPhaseItem()
 
 					mu.Lock()
 					failedTableNames = append(failedTableNames, tableName)
-					if isMySQLRowSizeTooLarge(err) {
-						rowSizeFailedTables = append(rowSizeFailedTables, tableName)
-					}
 					mu.Unlock()
 					totalFail.Add(1)
-
-					// Error 1118 有兜底机制（自动写 TXT + 排除），豁免 fast_fail 以收集完整列表
-					if isMySQLRowSizeTooLarge(err) {
-						continue
-					}
-					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-						migrationCtx.Stop(fmt.Errorf("failed to create table %s: %w", tableName, err))
-						return
-					}
 					continue
 				}
 
@@ -544,7 +522,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 
 	// context 停止且有错误时返回
 	if err := migrationCtx.Err(); err != nil {
-		return rowSizeFailedTables, failedTableNames, err
+		return failedTableNames, err
 	}
 
 	successCount := int(totalSuccess.Load())
@@ -560,53 +538,34 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 	}
 
 	if failCount > 0 {
-		return rowSizeFailedTables, failedTableNames, fmt.Errorf("%d tables failed to create", failCount)
+		return failedTableNames, fmt.Errorf("%d tables failed to create", failCount)
 	}
 
-	return rowSizeFailedTables, failedTableNames, nil
+	return failedTableNames, nil
 }
 
 type ddlExecutor interface {
 	ExecuteDDL(string) error
 }
 
-func createTableDDLWithRetry(executor ddlExecutor, tableConverter *converter.TableConverter, tableDDL *parser.TableDDL) (converter.ConvertResult, error) {
+func createTableDDL(executor ddlExecutor, tableConverter *converter.TableConverter, tableDDL *parser.TableDDL) (converter.ConvertResult, error) {
 	result, err := tableConverter.ConvertToMySQLResult(tableDDL, converter.ConvertOptions{})
 	if err != nil {
 		return converter.ConvertResult{}, err
 	}
-	logColumnDegradations(result.Degradations)
 
-	if err := executor.ExecuteDDL(result.SQL); err == nil {
-		return result, nil
-	} else if !isMySQLRowSizeTooLarge(err) {
+	if err := executor.ExecuteDDL(result.SQL); err != nil {
 		return result, err
-	} else {
-		firstErr := err
-		retryResult, retryErr := tableConverter.ConvertToMySQLResult(tableDDL, converter.ConvertOptions{
-			Mode:                    converter.ConvertModeAggressive,
-			Reason:                  converter.DegradationReasonError1118,
-			AllowNumericDegradation: true,
-		})
-		if retryErr != nil {
-			return result, fmt.Errorf("normal create failed with row size error: %w; aggressive conversion failed: %w", firstErr, retryErr)
-		}
-		logColumnDegradations(retryResult.Degradations)
-		if err := executor.ExecuteDDL(retryResult.SQL); err != nil {
-			return retryResult, fmt.Errorf("normal create failed with row size error: %w; aggressive retry failed: %w", firstErr, err)
-		}
-		return retryResult, nil
 	}
+	return result, nil
 }
 
-func isMySQLRowSizeTooLarge(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1118
-}
-
-func writeRowSizeFailedTables(tables []string) error {
-	content := strings.Join(tables, ", ")
-	return os.WriteFile(rowSizeFailedTablesFile, []byte(content), 0644)
+func writeCreateFailedTables(tables []string) error {
+	content := ""
+	if len(tables) > 0 {
+		content = strings.Join(tables, "\n") + "\n"
+	}
+	return os.WriteFile(createFailedTablesFile, []byte(content), 0644)
 }
 
 func loadCompletedTables() []string {
@@ -623,21 +582,6 @@ func loadCompletedTables() []string {
 		}
 	}
 	return tables
-}
-
-func logColumnDegradations(degradations []converter.ColumnDegradation) {
-	for _, degradation := range degradations {
-		logger.Warnf(
-			"Wide table degradation: table=%s reason=%s column=%s source=%s target=%s estimated_before=%d estimated_after=%d",
-			degradation.TableName,
-			degradation.Reason,
-			degradation.ColumnName,
-			degradation.SourceType,
-			degradation.TargetType,
-			degradation.EstimatedBytesBefore,
-			degradation.EstimatedBytesAfter,
-		)
-	}
 }
 
 // importDataWithCSVMapping 导入数据（基于 CSV 文件映射）

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -117,6 +118,104 @@ func TestWriteCreateFailedTablesWritesOneTablePerLine(t *testing.T) {
 	}
 	if got, want := string(data), "FORM_A\nFORM_B\n"; got != want {
 		t.Fatalf("create failed table content = %q, want %q", got, want)
+	}
+}
+
+type fakeRowCounter struct {
+	count int64
+	err   error
+}
+
+func (f fakeRowCounter) GetRowCount(string) (int64, error) {
+	return f.count, f.err
+}
+
+func TestValidateImportedRowCountMatches(t *testing.T) {
+	result := validateImportedRowCount(fakeRowCounter{count: 42}, "FORM_A", 42)
+	if !result.Valid {
+		t.Fatalf("Valid = false, want true: %#v", result)
+	}
+	if result.ExpectedRows != 42 || result.ActualRows != 42 {
+		t.Fatalf("result rows = (%d,%d), want (42,42)", result.ExpectedRows, result.ActualRows)
+	}
+}
+
+func TestValidateImportedRowCountMismatch(t *testing.T) {
+	result := validateImportedRowCount(fakeRowCounter{count: 40}, "FORM_A", 42)
+	if result.Valid {
+		t.Fatalf("Valid = true, want false: %#v", result)
+	}
+	if result.ExpectedRows != 42 {
+		t.Fatalf("ExpectedRows = %d, want 42", result.ExpectedRows)
+	}
+	if result.ActualRows != 40 {
+		t.Fatalf("ActualRows = %d, want 40", result.ActualRows)
+	}
+	if result.ErrorMessage == "" {
+		t.Fatal("ErrorMessage is empty, want mismatch detail")
+	}
+}
+
+
+func TestValidateImportedRowCountError(t *testing.T) {
+	result := validateImportedRowCount(fakeRowCounter{err: errors.New("db down")}, "FORM_A", 42)
+	if result.Valid {
+		t.Fatalf("Valid = true, want false: %#v", result)
+	}
+	if result.ErrorMessage == "" {
+		t.Fatal("ErrorMessage is empty, want error detail")
+	}
+	if result.TableName != "FORM_A" {
+		t.Fatalf("TableName = %q, want FORM_A", result.TableName)
+	}
+	if result.ExpectedRows != 42 {
+		t.Fatalf("ExpectedRows = %d, want 42", result.ExpectedRows)
+	}
+}
+
+func TestWriteTableListWritesOneTablePerLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tables.txt")
+	if err := writeTableList(path, []string{"FORM_A", "FORM_B"}); err != nil {
+		t.Fatalf("writeTableList() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "FORM_A\nFORM_B\n" {
+		t.Fatalf("content = %q, want one table per line", string(data))
+	}
+}
+
+
+func TestWriteTableListEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+	if err := writeTableList(path, []string{}); err != nil {
+		t.Fatalf("writeTableList(empty) error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("content = %q, want empty file", string(data))
+	}
+}
+
+func TestWriteTableListNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nil.txt")
+	if err := writeTableList(path, nil); err != nil {
+		t.Fatalf("writeTableList(nil) error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("content = %q, want empty file", string(data))
 	}
 }
 

@@ -41,6 +41,12 @@ const (
 	createFailedTablesFile = "create_failed_tables.txt"
 	completedTablesFile    = "completed_tables.txt"
 	slowTablesFile         = "slow_tables.txt"
+
+	// failedTablesFile and rowCountMismatchFile are forward-declarations
+	// for Task 5 integration wiring; they will become used once the
+	// row-count validation and failed-table tracking callbacks are wired in.
+	failedTablesFile       = "failed_tables.txt"
+	rowCountMismatchFile   = "row_count_mismatch_tables.txt"
 )
 
 func logImportDiagnostic(diag *importer.ImportDiagnostic) {
@@ -548,6 +554,18 @@ type ddlExecutor interface {
 	ExecuteDDL(string) error
 }
 
+type rowCounter interface {
+	GetRowCount(tableName string) (int64, error)
+}
+
+type rowCountValidationResult struct {
+	TableName    string
+	ExpectedRows int64
+	ActualRows   int64
+	Valid        bool
+	ErrorMessage string
+}
+
 func createTableDDL(executor ddlExecutor, tableConverter *converter.TableConverter, tableDDL *parser.TableDDL) (converter.ConvertResult, error) {
 	result, err := tableConverter.ConvertToMySQLResult(tableDDL, converter.ConvertOptions{})
 	if err != nil {
@@ -560,12 +578,49 @@ func createTableDDL(executor ddlExecutor, tableConverter *converter.TableConvert
 	return result, nil
 }
 
+func validateImportedRowCount(counter rowCounter, tableName string, expectedRows int64) rowCountValidationResult {
+	actualRows, err := counter.GetRowCount(tableName)
+	if err != nil {
+		return rowCountValidationResult{
+			TableName:    tableName,
+			ExpectedRows: expectedRows,
+			ActualRows:   0,
+			Valid:        false,
+			ErrorMessage: fmt.Sprintf("failed to count rows for %s: %v", tableName, err),
+		}
+	}
+	if actualRows != expectedRows {
+		return rowCountValidationResult{
+			TableName:    tableName,
+			ExpectedRows: expectedRows,
+			ActualRows:   actualRows,
+			Valid:        false,
+			ErrorMessage: fmt.Sprintf("row count mismatch: expected=%d actual=%d", expectedRows, actualRows),
+		}
+	}
+	return rowCountValidationResult{
+		TableName:    tableName,
+		ExpectedRows: expectedRows,
+		ActualRows:   actualRows,
+		Valid:        true,
+	}
+}
+
 func writeCreateFailedTables(tables []string) error {
+	return writeTableList(createFailedTablesFile, tables)
+}
+
+// writeTableList writes a newline-separated list of table names to path.
+// An empty or nil tables slice produces an empty file at path.
+func writeTableList(path string, tables []string) error {
 	content := ""
 	if len(tables) > 0 {
 		content = strings.Join(tables, "\n") + "\n"
 	}
-	return os.WriteFile(createFailedTablesFile, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("writeTableList(%s): %w", path, err)
+	}
+	return nil
 }
 
 func loadCompletedTables() []string {

@@ -45,8 +45,8 @@ const (
 	// failedTablesFile and rowCountMismatchFile are forward-declarations
 	// for Task 5 integration wiring; they will become used once the
 	// row-count validation and failed-table tracking callbacks are wired in.
-	failedTablesFile       = "failed_tables.txt"
-	rowCountMismatchFile   = "row_count_mismatch_tables.txt"
+	failedTablesFile     = "failed_tables.txt"
+	rowCountMismatchFile = "row_count_mismatch_tables.txt"
 )
 
 func logImportDiagnostic(diag *importer.ImportDiagnostic) {
@@ -566,6 +566,11 @@ type rowCountValidationResult struct {
 	ErrorMessage string
 }
 
+type skippedImportTable struct {
+	TableName string
+	Reason    string
+}
+
 func createTableDDL(executor ddlExecutor, tableConverter *converter.TableConverter, tableDDL *parser.TableDDL) (converter.ConvertResult, error) {
 	result, err := tableConverter.ConvertToMySQLResult(tableDDL, converter.ConvertOptions{})
 	if err != nil {
@@ -621,6 +626,25 @@ func writeTableList(path string, tables []string) error {
 		return fmt.Errorf("writeTableList(%s): %w", path, err)
 	}
 	return nil
+}
+
+func buildImportCandidates(tableNames []string, csvTableMap map[string]string, tableMatcher matcher.TableNameMatcher, cfg *config.Config) ([]importer.ImportCandidate, []skippedImportTable) {
+	candidates := make([]importer.ImportCandidate, 0, len(tableNames))
+	var skipped []skippedImportTable
+	for _, tableName := range tableNames {
+		csvPath, ok := csvTableMap[tableMatcher.Key(tableName)]
+		if !ok {
+			skipped = append(skipped, skippedImportTable{TableName: tableName, Reason: "CSV file not found"})
+			continue
+		}
+		info, err := os.Stat(csvPath)
+		if err != nil {
+			skipped = append(skipped, skippedImportTable{TableName: tableName, Reason: fmt.Sprintf("CSV stat failed: %v", err)})
+			continue
+		}
+		candidates = append(candidates, importer.NewImportCandidate(tableName, csvPath, info.Size(), cfg.Migration))
+	}
+	return importer.OrderImportCandidates(candidates), skipped
 }
 
 func loadCompletedTables() []string {
@@ -703,6 +727,31 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	}
 	if slowFile != nil {
 		defer slowFile.Close()
+	}
+
+	if cfg.Migration.ShouldUseAdaptiveImport() {
+		results, failedTables, err := importDataAdaptive(conn, cfg, tablesToImport, csvTableMap, tableMatcher, tracker, migrationCtx, dataImporter, completedFile, slowFile)
+		successCount := 0
+		failCount := 0
+		var totalRows int64
+		for _, result := range results {
+			if result.Success && result.ErrorCount == 0 {
+				successCount++
+			} else {
+				failCount++
+			}
+			totalRows += result.InsertedRows
+		}
+
+		printErrorSummary(dataImporter.GetErrorRecorder(), failedTables)
+		logger.Infof("Data import completed: %d success, %d failed, %d total rows",
+			successCount, failCount, totalRows)
+		generateMigrationReport("Data Import Report", nil, successCount, failCount, failedTables)
+
+		if err != nil {
+			return err
+		}
+		return finalError(failCount, "tables failed to import", migrationCtx)
 	}
 
 	slowThreshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
@@ -856,6 +905,165 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	generateMigrationReport("Data Import Report", nil, successCount, failCount, failedTables)
 
 	return finalError(failCount, "tables failed to import", migrationCtx)
+}
+
+func importDataAdaptive(
+	conn *database.Connection,
+	cfg *config.Config,
+	tablesToImport []string,
+	csvTableMap map[string]string,
+	tableMatcher matcher.TableNameMatcher,
+	tracker *progress.Tracker,
+	migrationCtx *migration.MigrationContext,
+	dataImporter *importer.DataImporter,
+	completedFile *os.File,
+	slowFile *os.File,
+) ([]*importer.ImportResult, []string, error) {
+	candidates, skipped := buildImportCandidates(tablesToImport, csvTableMap, tableMatcher, cfg)
+	results := make([]*importer.ImportResult, 0, len(tablesToImport))
+	var failedTables []string
+	var mismatchTables []string
+
+	for _, skippedTable := range skipped {
+		_, _, diag := dataImporter.FindCSVFile(skippedTable.TableName)
+		logImportDiagnostic(diag)
+		if err := tracker.SkipTable(skippedTable.TableName, skippedTable.Reason); err != nil {
+			logger.Warnf("Failed to mark table %s as skipped: %v", skippedTable.TableName, err)
+		}
+		tracker.SkipPhaseItem()
+		results = append(results, &importer.ImportResult{
+			TableName:     skippedTable.TableName,
+			Success:       true,
+			InsertedRows:  0,
+			ProcessedRows: 0,
+			ErrorCount:    0,
+		})
+	}
+
+	limiter := importer.NewAdaptiveLimiter(
+		cfg.Migration.EffectiveImportTokens(),
+		cfg.Migration.EffectiveMinImportTokens(),
+		time.Duration(cfg.Migration.EffectiveRecoveryWindowSeconds())*time.Second,
+		time.Now,
+	)
+	dataImporter.WithPressureCallback(func(event importer.ImportPressureEvent) {
+		limiter.RecordPressure(event)
+		logger.Warnf("Adaptive import pressure: table=%s batch=%d signal=%s detail=%s dynamic_tokens=%d",
+			event.TableName, event.BatchNum, event.Signal, event.Detail, limiter.DynamicLimit())
+	})
+
+	maxWorkers := cfg.Migration.MaxWorkers
+	if maxWorkers <= 0 {
+		maxWorkers = 1
+	}
+	workerSlots := make(chan struct{}, maxWorkers)
+	resultChan := make(chan *importer.ImportResult, len(candidates))
+	var wg sync.WaitGroup
+	var fileMu sync.Mutex
+	slowThreshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
+
+	for _, candidate := range candidates {
+		if migrationCtx.Err() != nil {
+			break
+		}
+		limiter.TryRecover()
+		if err := limiter.Acquire(migrationCtx.Context(), candidate.Weight); err != nil {
+			break
+		}
+		workerSlots <- struct{}{}
+		wg.Add(1)
+		go func(candidate importer.ImportCandidate) {
+			defer wg.Done()
+			defer limiter.Release(candidate.Weight)
+			defer func() { <-workerSlots }()
+
+			logger.Infof("Adaptive import start: table=%s class=%s size_mb=%d weight=%d dynamic_tokens=%d",
+				candidate.TableName, candidate.Class, candidate.SizeMB, candidate.Weight, limiter.DynamicLimit())
+
+			if err := tracker.StartTable(candidate.TableName, candidate.CSVPath, false); err != nil {
+				logger.Warnf("Failed to start tracking table %s: %v", candidate.TableName, err)
+			}
+			importStart := time.Now()
+			result, err, diag := dataImporter.ImportTable(candidate.TableName)
+			elapsed := time.Since(importStart)
+			if err != nil {
+				logger.Errorf("Failed to import table %s: %v", candidate.TableName, err)
+				logImportDiagnostic(diag)
+				if trackErr := tracker.FailTable(candidate.TableName, err.Error()); trackErr != nil {
+					logger.Warnf("Failed to mark table %s as failed: %v", candidate.TableName, trackErr)
+				}
+				tracker.FailPhaseItem()
+				resultChan <- &importer.ImportResult{TableName: candidate.TableName, Success: false, ErrorMessage: err.Error()}
+				if cfg.Migration.IsFastFail() {
+					migrationCtx.Stop(fmt.Errorf("failed to import table %s: %w", candidate.TableName, err))
+				}
+				return
+			}
+
+			if result.Success && cfg.Migration.ShouldValidateRowCount() {
+				validation := validateImportedRowCount(conn, candidate.TableName, result.ProcessedRows)
+				logger.Infof("Row count validation: table=%s csv_rows=%d mysql_rows=%d valid=%t",
+					candidate.TableName, validation.ExpectedRows, validation.ActualRows, validation.Valid)
+				if !validation.Valid {
+					result.Success = false
+					result.ErrorCount++
+					result.ErrorMessage = validation.ErrorMessage
+					fileMu.Lock()
+					mismatchTables = append(mismatchTables, candidate.TableName)
+					fileMu.Unlock()
+				}
+			}
+
+			if result.Success && result.ErrorCount == 0 {
+				if err := tracker.SetTableTotalRows(candidate.TableName, result.TotalRows); err != nil {
+					logger.Warnf("Failed to set total rows for %s: %v", candidate.TableName, err)
+				}
+				if err := tracker.CompleteTable(candidate.TableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
+					logger.Warnf("Failed to mark table %s as completed: %v", candidate.TableName, err)
+				}
+				tracker.CompletePhaseItem()
+				fileMu.Lock()
+				if completedFile != nil {
+					if _, err := completedFile.WriteString(candidate.TableName + "\n"); err != nil {
+						logger.Warnf("Failed to record completed table %s: %v", candidate.TableName, err)
+					}
+				}
+				if elapsed > slowThreshold {
+					logger.Infof("Table %s exceeded slow threshold: %s > %s",
+						candidate.TableName, elapsed.Truncate(time.Second), slowThreshold)
+					if slowFile != nil {
+						if _, err := slowFile.WriteString(candidate.TableName + "\n"); err != nil {
+							logger.Warnf("Failed to record slow table %s: %v", candidate.TableName, err)
+						}
+					}
+				}
+				fileMu.Unlock()
+			} else {
+				if err := tracker.FailTable(candidate.TableName, result.ErrorMessage); err != nil {
+					logger.Warnf("Failed to mark table %s as failed: %v", candidate.TableName, err)
+				}
+				tracker.FailPhaseItem()
+			}
+			resultChan <- result
+		}(candidate)
+	}
+
+	wg.Wait()
+	close(resultChan)
+
+	for result := range resultChan {
+		results = append(results, result)
+		if !result.Success || result.ErrorCount > 0 {
+			failedTables = append(failedTables, result.TableName)
+		}
+	}
+	if err := writeTableList(failedTablesFile, failedTables); err != nil {
+		logger.Warnf("Failed to write %s: %v", failedTablesFile, err)
+	}
+	if err := writeTableList(rowCountMismatchFile, mismatchTables); err != nil {
+		logger.Warnf("Failed to write %s: %v", rowCountMismatchFile, err)
+	}
+	return results, failedTables, finalError(len(failedTables), "tables failed to import", migrationCtx)
 }
 
 func finalError(failCount int, desc string, migrationCtx *migration.MigrationContext) error {

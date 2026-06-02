@@ -12,6 +12,7 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/converter"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/importer"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
@@ -156,7 +157,6 @@ func TestValidateImportedRowCountMismatch(t *testing.T) {
 	}
 }
 
-
 func TestValidateImportedRowCountError(t *testing.T) {
 	result := validateImportedRowCount(fakeRowCounter{err: errors.New("db down")}, "FORM_A", 42)
 	if result.Valid {
@@ -188,7 +188,6 @@ func TestWriteTableListWritesOneTablePerLine(t *testing.T) {
 	}
 }
 
-
 func TestWriteTableListEmpty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.txt")
@@ -216,6 +215,39 @@ func TestWriteTableListNil(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Fatalf("content = %q, want empty file", string(data))
+	}
+}
+
+func TestBuildImportCandidatesUsesCSVFileSize(t *testing.T) {
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "FORM_A.csv")
+	if err := os.WriteFile(csvPath, make([]byte, 129*1024*1024), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		Migration: config.MigrationConfig{
+			AdaptiveImport: config.AdaptiveImportConfig{
+				ImportTokens: 10,
+				LargeTableMB: 1024,
+				HugeTableMB:  5120,
+			},
+		},
+	}
+	tableMatcher := matcher.DefaultTableNameMatcher()
+	csvTableMap := map[string]string{
+		tableMatcher.Key("FORM_A"): csvPath,
+	}
+
+	candidates, skipped := buildImportCandidates([]string{"FORM_A"}, csvTableMap, tableMatcher, cfg)
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+	if candidates[0].Class != importer.ImportTableMedium {
+		t.Fatalf("Class = %s, want %s", candidates[0].Class, importer.ImportTableMedium)
 	}
 }
 

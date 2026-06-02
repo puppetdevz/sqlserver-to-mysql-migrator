@@ -596,6 +596,115 @@ func TestRecordBatchErrorEmptyRows(t *testing.T) {
 	}
 }
 
+func TestPressureEventsForBatchClassifiesSignals(t *testing.T) {
+	tests := []struct {
+		name          string
+		batchNum      int
+		retries       int
+		duration      time.Duration
+		slowThreshold time.Duration
+		err           error
+		wantSignals   []PressureSignal
+	}{
+		{
+			name:          "retry and slow batch",
+			batchNum:      3,
+			retries:       2,
+			duration:      12 * time.Second,
+			slowThreshold: 10 * time.Second,
+			wantSignals:   []PressureSignal{PressureRetry, PressureSlowBatch},
+		},
+		{
+			name:          "lock wait",
+			batchNum:      7,
+			duration:      time.Second,
+			slowThreshold: 10 * time.Second,
+			err: fmt.Errorf("failed to execute batch insert: %w", &mysql.MySQLError{
+				Number:  1205,
+				Message: "Lock wait timeout exceeded; try restarting transaction",
+			}),
+			wantSignals: []PressureSignal{PressureLockWait},
+		},
+		{
+			name:          "connection",
+			batchNum:      9,
+			duration:      time.Second,
+			slowThreshold: 10 * time.Second,
+			err:           fmt.Errorf("failed to execute batch insert: %w", driver.ErrBadConn),
+			wantSignals:   []PressureSignal{PressureConnection},
+		},
+		{
+			name:          "capacity",
+			batchNum:      11,
+			duration:      time.Second,
+			slowThreshold: 10 * time.Second,
+			err: fmt.Errorf("failed to execute batch insert: %w", &mysql.MySQLError{
+				Number:  1114,
+				Message: "The table is full",
+			}),
+			wantSignals: []PressureSignal{PressureCapacity},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := pressureEventsForBatch("FORM_A", tt.batchNum, tt.retries, tt.duration, tt.slowThreshold, tt.err)
+			if len(events) != len(tt.wantSignals) {
+				t.Fatalf("len(events) = %d, want %d: %#v", len(events), len(tt.wantSignals), events)
+			}
+			for i, want := range tt.wantSignals {
+				if events[i].Signal != want {
+					t.Fatalf("events[%d].Signal = %s, want %s", i, events[i].Signal, want)
+				}
+				if events[i].TableName != "FORM_A" {
+					t.Fatalf("events[%d].TableName = %s, want FORM_A", i, events[i].TableName)
+				}
+				if events[i].BatchNum != tt.batchNum {
+					t.Fatalf("events[%d].BatchNum = %d, want %d", i, events[i].BatchNum, tt.batchNum)
+				}
+			}
+		})
+	}
+}
+
+func TestTableImporterPressureCallbackEmitsPerEventWithoutMutatingInsertResult(t *testing.T) {
+	var got []ImportPressureEvent
+	ti := (&TableImporter{tableName: "FORM_A"}).WithPressureCallback(func(event ImportPressureEvent) {
+		got = append(got, event)
+	})
+
+	result := adaptiveBatchInsertResult{affectedRows: 5, retries: 1}
+	wantResult := result
+	ti.emitPressureEventsForBatch(4, result, 12*time.Second, 10*time.Second)
+
+	if !reflect.DeepEqual(result, wantResult) {
+		t.Fatalf("result mutated: got %#v, want %#v", result, wantResult)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].Signal != PressureRetry || got[1].Signal != PressureSlowBatch {
+		t.Fatalf("signals = %s, %s; want %s, %s", got[0].Signal, got[1].Signal, PressureRetry, PressureSlowBatch)
+	}
+}
+
+func TestDataImporterWithPressureCallbackPropagatesToCreatedTableImporter(t *testing.T) {
+	var got []ImportPressureEvent
+	di := (&DataImporter{ctx: context.Background()}).WithPressureCallback(func(event ImportPressureEvent) {
+		got = append(got, event)
+	})
+
+	ti := di.newTableImporter("FORM_A", "FORM_A.csv")
+	ti.emitPressureEventsForBatch(1, adaptiveBatchInsertResult{retries: 1}, time.Second, 10*time.Second)
+
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].Signal != PressureRetry {
+		t.Fatalf("Signal = %s, want %s", got[0].Signal, PressureRetry)
+	}
+}
+
 func TestGetErrorCount(t *testing.T) {
 	recorder, _ := NewErrorRecorder("")
 	defer recorder.Close()

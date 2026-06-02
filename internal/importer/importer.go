@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
@@ -39,6 +42,7 @@ type TableImporter struct {
 	csvPath          string
 	errorRecorder    *ErrorRecorder
 	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
+	pressureCallback func(ImportPressureEvent)
 	ctx              context.Context
 	countCSVRowsFunc func(*os.File) (int64, error)
 }
@@ -65,6 +69,13 @@ func NewTableImporter(conn *database.Connection, cfg *config.Config, tableName s
 // WithProgressCallback sets a per-batch progress callback for long-running imports.
 func (ti *TableImporter) WithProgressCallback(callback func(tableName string, totalRows, processedRows, insertedRows int64)) *TableImporter {
 	ti.progressCallback = callback
+	return ti
+}
+
+// WithPressureCallback sets a callback for import pressure signals used by adaptive scheduling.
+// The callback runs synchronously on the DB writer path and must stay fast/non-blocking.
+func (ti *TableImporter) WithPressureCallback(callback func(ImportPressureEvent)) *TableImporter {
+	ti.pressureCallback = callback
 	return ti
 }
 
@@ -491,6 +502,65 @@ func batchRetryDelay(attempt int, baseDelay, maxDelay time.Duration) time.Durati
 	return delay
 }
 
+func pressureEventsForBatch(tableName string, batchNum int, retries int, duration time.Duration, slowThreshold time.Duration, err error) []ImportPressureEvent {
+	var events []ImportPressureEvent
+	if retries > 0 {
+		events = append(events, ImportPressureEvent{
+			TableName: tableName,
+			BatchNum:  batchNum,
+			Signal:    PressureRetry,
+			Detail:    fmt.Sprintf("retries=%d", retries),
+		})
+	}
+	if slowThreshold > 0 && duration > slowThreshold {
+		events = append(events, ImportPressureEvent{
+			TableName: tableName,
+			BatchNum:  batchNum,
+			Signal:    PressureSlowBatch,
+			Detail:    fmt.Sprintf("duration=%s threshold=%s", duration.Truncate(time.Millisecond), slowThreshold),
+		})
+	}
+	if isRetryableConnectionError(err) {
+		events = append(events, ImportPressureEvent{
+			TableName: tableName,
+			BatchNum:  batchNum,
+			Signal:    PressureConnection,
+			Detail:    err.Error(),
+		})
+	}
+	if isMySQLLockWaitTimeout(err) {
+		events = append(events, ImportPressureEvent{
+			TableName: tableName,
+			BatchNum:  batchNum,
+			Signal:    PressureLockWait,
+			Detail:    err.Error(),
+		})
+	}
+	if isDatabaseCapacityError(err) {
+		events = append(events, ImportPressureEvent{
+			TableName: tableName,
+			BatchNum:  batchNum,
+			Signal:    PressureCapacity,
+			Detail:    err.Error(),
+		})
+	}
+	return events
+}
+
+func isMySQLLockWaitTimeout(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1205
+}
+
+func (ti *TableImporter) emitPressureEventsForBatch(batchNum int, result adaptiveBatchInsertResult, duration time.Duration, slowThreshold time.Duration) {
+	if ti.pressureCallback == nil {
+		return
+	}
+	for _, event := range pressureEventsForBatch(ti.tableName, batchNum, result.retries, duration, slowThreshold, result.err) {
+		ti.pressureCallback(event)
+	}
+}
+
 // pipelinedImport 流水线导入：边读边写
 func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, csvTotalRows int64) (*ImportResult, error, *ImportDiagnostic) {
 	safeCtx := ti.ctx
@@ -826,6 +896,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			result := insertBatchWithAdaptiveRetry(safeCtx, inserter, ti.tableName, bd.batchNum, bd.rows, nil)
 			affected := result.affectedRows
 			insertErr := result.err
+			batchDuration := time.Since(batchStart)
+
+			slowThreshold := time.Duration(ti.cfg.Migration.EffectiveSlowBatchSeconds()) * time.Second
+			ti.emitPressureEventsForBatch(bd.batchNum, result, batchDuration, slowThreshold)
 
 			// 发送结果到 resultChan
 			resultChan <- batchResult{
@@ -848,7 +922,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			} else {
 				totalInserted += affected
 				logger.Debugf("[DB Writer] Batch %d: %d rows inserted, estimated_bytes=%d retries=%d split=%t duration=%.1fs totalInserted=%d",
-					bd.batchNum, affected, estimateBatchBytes(bd.rows), result.retries, result.split, time.Since(batchStart).Seconds(), totalInserted)
+					bd.batchNum, affected, estimateBatchBytes(bd.rows), result.retries, result.split, batchDuration.Seconds(), totalInserted)
 			}
 		}
 	}()
@@ -1056,6 +1130,7 @@ type DataImporter struct {
 	cfg              *config.Config
 	errorRecorder    *ErrorRecorder
 	progressCallback func(tableName string, totalRows, processedRows, insertedRows int64)
+	pressureCallback func(ImportPressureEvent)
 	ctx              context.Context
 }
 
@@ -1080,6 +1155,13 @@ func (di *DataImporter) WithProgressCallback(callback func(tableName string, tot
 	return di
 }
 
+// WithPressureCallback sets a callback for table-level import pressure signals.
+// The callback runs synchronously on each table's DB writer path; scheduler callbacks should only update in-memory limiter state.
+func (di *DataImporter) WithPressureCallback(callback func(ImportPressureEvent)) *DataImporter {
+	di.pressureCallback = callback
+	return di
+}
+
 // WithContext sets a context for cancellation support in table imports.
 func (di *DataImporter) WithContext(ctx context.Context) *DataImporter {
 	di.ctx = ctx
@@ -1095,14 +1177,24 @@ func (di *DataImporter) ImportTable(tableName string) (*ImportResult, error, *Im
 	}
 
 	// 创建表导入器
+	importer := di.newTableImporter(tableName, csvPath)
+
+	// 执行导入
+	return importer.Import()
+}
+
+func (di *DataImporter) newTableImporter(tableName string, csvPath string) *TableImporter {
 	importer := NewTableImporter(di.conn, di.cfg, tableName, csvPath, di.errorRecorder)
 	if di.progressCallback != nil {
 		importer.WithProgressCallback(di.progressCallback)
 	}
-	importer.WithContext(di.ctx)
-
-	// 执行导入
-	return importer.Import()
+	if di.pressureCallback != nil {
+		importer.WithPressureCallback(di.pressureCallback)
+	}
+	if di.ctx != nil {
+		importer.WithContext(di.ctx)
+	}
+	return importer
 }
 
 // Close 关闭导入器

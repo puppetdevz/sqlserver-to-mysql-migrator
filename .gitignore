@@ -37,3 +37,4 @@ logs/
 data/
 .go-cache
 .claude/worktrees/
+.reasonix/

@@ -38,3 +38,5 @@ data/
 .go-cache
 .claude/worktrees/
 .reasonix/
+completed_tables.txt
+slow_tables.txt

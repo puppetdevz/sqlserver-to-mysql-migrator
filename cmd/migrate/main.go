@@ -103,6 +103,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	cfg.Logging.File = config.ExpandLogFilePattern(cfg.Logging.File, time.Now())
 
 	// 初始化日志
 	if err := logger.Init(
@@ -120,7 +121,7 @@ func main() {
 
 	logger.Info("=== Database Migration Tool Started ===")
 	logger.Infof("Version: %s", Version)
-	logger.Infof("Config: %s", *configPath)
+	logger.Infof("Config: %s", cfg.ConfigFilesSummary())
 
 	tableScope, err := tablescope.Resolve(*tables, *reimport, *reimportFile)
 	if err != nil {

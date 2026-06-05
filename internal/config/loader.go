@@ -12,6 +12,11 @@ import (
 // Load 从文件加载配置，自动合并同目录下的 .local.yaml 文件。
 // local 文件路径由基础文件路径推导：config.yaml → config.local.yaml
 func Load(configPath string) (*Config, error) {
+	baseAbs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve config file path: %w", err)
+	}
+
 	// 读取基础配置文件
 	baseData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -20,6 +25,10 @@ func Load(configPath string) (*Config, error) {
 
 	// 检查并加载 local 配置文件
 	localPath := localPath(configPath)
+	localAbs, err := filepath.Abs(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve local config file path: %w", err)
+	}
 	localData, err := os.ReadFile(localPath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read local config file: %w", err)
@@ -33,7 +42,6 @@ func Load(configPath string) (*Config, error) {
 
 	// 如果 local 文件存在，解析并合并
 	if localData != nil {
-		fmt.Fprintf(os.Stderr, "Config: merging local overrides from %s\n", localPath)
 		var localMap map[string]any
 		if err := yaml.Unmarshal(localData, &localMap); err != nil {
 			return nil, fmt.Errorf("failed to parse local config file: %w", err)
@@ -57,6 +65,11 @@ func Load(configPath string) (*Config, error) {
 	// 验证配置
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	cfg.configFiles = []string{baseAbs}
+	if localData != nil {
+		cfg.configFiles = []string{localAbs, baseAbs}
 	}
 
 	return &cfg, nil

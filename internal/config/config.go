@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
@@ -14,6 +15,8 @@ type Config struct {
 	Migration MigrationConfig `yaml:"migration"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	Converter ConverterConfig `yaml:"converter"`
+
+	configFiles []string
 }
 
 // SourceConfig 源数据配置
@@ -74,6 +77,97 @@ type LoggingConfig struct {
 	MaxSize    int    `yaml:"max_size"`
 	MaxBackups int    `yaml:"max_backups"`
 	MaxAge     int    `yaml:"max_age"`
+}
+
+// ConfigFiles returns the effective configuration files in override order.
+func (c *Config) ConfigFiles() []string {
+	if c == nil {
+		return nil
+	}
+	files := make([]string, len(c.configFiles))
+	copy(files, c.configFiles)
+	return files
+}
+
+// ConfigFilesSummary returns effective configuration files as "higher > lower".
+func (c *Config) ConfigFilesSummary() string {
+	return strings.Join(c.ConfigFiles(), " > ")
+}
+
+// ExpandLogFilePattern expands date/time tokens in logging.file.
+func ExpandLogFilePattern(pattern string, now time.Time) string {
+	if pattern == "" {
+		return ""
+	}
+
+	var out strings.Builder
+	for i := 0; i < len(pattern); {
+		if pattern[i] != '{' {
+			out.WriteByte(pattern[i])
+			i++
+			continue
+		}
+
+		end := strings.IndexByte(pattern[i+1:], '}')
+		if end < 0 {
+			out.WriteString(pattern[i:])
+			break
+		}
+		end += i + 1
+		token := pattern[i+1 : end]
+		if expanded, ok := expandLogFileToken(token, now); ok {
+			out.WriteString(expanded)
+		} else {
+			out.WriteString(pattern[i : end+1])
+		}
+		i = end + 1
+	}
+	return out.String()
+}
+
+func expandLogFileToken(token string, now time.Time) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+
+	replacements := []struct {
+		token string
+		value string
+	}{
+		{"yyyy", now.Format("2006")},
+		{"yy", now.Format("06")},
+		{"MM", now.Format("01")},
+		{"M", fmt.Sprintf("%d", int(now.Month()))},
+		{"dd", now.Format("02")},
+		{"d", fmt.Sprintf("%d", now.Day())},
+		{"HH", now.Format("15")},
+		{"mm", now.Format("04")},
+		{"ss", now.Format("05")},
+	}
+
+	var out strings.Builder
+	for i := 0; i < len(token); {
+		matched := false
+		for _, replacement := range replacements {
+			if strings.HasPrefix(token[i:], replacement.token) {
+				out.WriteString(replacement.value)
+				i += len(replacement.token)
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+
+		if (token[i] >= 'A' && token[i] <= 'Z') || (token[i] >= 'a' && token[i] <= 'z') {
+			return "", false
+		}
+		out.WriteByte(token[i])
+		i++
+	}
+
+	return out.String(), true
 }
 
 // ConverterConfig 类型转换器配置

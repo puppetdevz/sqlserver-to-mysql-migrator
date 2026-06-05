@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfigForTest(t *testing.T, body string) string {
@@ -237,6 +238,14 @@ logging:
 	}
 	if cfg.Target.Host != "localhost" {
 		t.Fatalf("Target.Host = %s, want localhost", cfg.Target.Host)
+	}
+
+	baseAbs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("Abs(path) error = %v", err)
+	}
+	if got := cfg.ConfigFilesSummary(); got != baseAbs {
+		t.Fatalf("ConfigFilesSummary() = %q, want %q", got, baseAbs)
 	}
 }
 
@@ -617,5 +626,84 @@ func TestAdaptiveImportMinTokensClampedToImportTokens(t *testing.T) {
 
 	if got := cfg.EffectiveMinImportTokens(); got != 2 {
 		t.Fatalf("EffectiveMinImportTokens() = %d, want 2", got)
+	}
+}
+
+func TestExpandLogFilePatternReplacesDateTimeTokens(t *testing.T) {
+	now := time.Date(2026, 6, 5, 13, 39, 8, 0, time.Local)
+
+	got := ExpandLogFilePattern("logs/migration.{yyyy}.{MMdd}.{HHmmss}.log", now)
+	want := "logs/migration.2026.0605.133908.log"
+	if got != want {
+		t.Fatalf("ExpandLogFilePattern() = %q, want %q", got, want)
+	}
+}
+
+func TestExpandLogFilePatternKeepsUnknownTokens(t *testing.T) {
+	now := time.Date(2026, 6, 5, 13, 39, 8, 0, time.Local)
+
+	got := ExpandLogFilePattern("migration.{yyyy}.{unknown}.log", now)
+	want := "migration.2026.{unknown}.log"
+	if got != want {
+		t.Fatalf("ExpandLogFilePattern() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRecordsEffectiveConfigFilesInOverrideOrder(t *testing.T) {
+	base := writeConfigForTest(t, `
+source:
+  ddl_file: "ddl.sql"
+  csv_directory: "csv"
+target:
+  host: "localhost"
+  port: 3306
+  database: "migration_example"
+  user: "root"
+migration:
+  batch_size: 100
+  max_workers: 1
+  on_duplicate: "replace"
+logging:
+  level: "INFO"
+`)
+
+	local := writeConfigForTest(t, `
+target:
+  password: "real-secret"
+`)
+	localPath := base[:len(base)-len(".yaml")] + ".local.yaml"
+	if err := os.Rename(local, localPath); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+
+	cfg, err := Load(base)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	baseAbs, err := filepath.Abs(base)
+	if err != nil {
+		t.Fatalf("Abs(base) error = %v", err)
+	}
+	localAbs, err := filepath.Abs(localPath)
+	if err != nil {
+		t.Fatalf("Abs(localPath) error = %v", err)
+	}
+
+	gotFiles := cfg.ConfigFiles()
+	wantFiles := []string{localAbs, baseAbs}
+	if len(gotFiles) != len(wantFiles) {
+		t.Fatalf("ConfigFiles() = %v, want %v", gotFiles, wantFiles)
+	}
+	for i := range wantFiles {
+		if gotFiles[i] != wantFiles[i] {
+			t.Fatalf("ConfigFiles()[%d] = %q, want %q", i, gotFiles[i], wantFiles[i])
+		}
+	}
+
+	gotSummary := cfg.ConfigFilesSummary()
+	wantSummary := localAbs + " > " + baseAbs
+	if gotSummary != wantSummary {
+		t.Fatalf("ConfigFilesSummary() = %q, want %q", gotSummary, wantSummary)
 	}
 }

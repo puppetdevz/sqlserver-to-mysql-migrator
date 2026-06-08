@@ -739,20 +739,16 @@ func TestBuildUpperColumnMap(t *testing.T) {
 // ============================================================================
 
 func TestRecordErrorWithFile(t *testing.T) {
-	tmpDir := os.TempDir()
-	logPath := filepath.Join(tmpDir, fmt.Sprintf("migration_test_%d", time.Now().UnixNano()))
+	logPath := filepath.Join(t.TempDir(), "migration_test.log")
 
 	recorder, err := NewErrorRecorder(logPath)
 	if err != nil {
 		t.Fatalf("NewErrorRecorder error: %v", err)
 	}
-	defer func() {
-		recorder.Close()
-		os.RemoveAll(logPath)
-	}()
+	defer recorder.Close()
 
 	if recorder.file == nil {
-		t.Fatal("file should not be nil when logDir is provided")
+		t.Fatal("file should not be nil when log file is provided")
 	}
 
 	recorder.RecordError("users", "INSERT INTO users (id) VALUES (1)", []string{"1", "John", "extra"}, fmt.Errorf("test error"))
@@ -777,7 +773,7 @@ func TestRecordErrorWithFile(t *testing.T) {
 	}
 
 	// verify file was written
-	content, err := os.ReadFile(filepath.Join(logPath, "migration.log"))
+	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("failed to read log file: %v", err)
 	}
@@ -789,19 +785,37 @@ func TestRecordErrorWithFile(t *testing.T) {
 	}
 }
 
+func TestNewDataImporterUsesConfiguredLogFileForErrorRecorder(t *testing.T) {
+	logDir := t.TempDir()
+	logFile := filepath.Join(logDir, "migration.2026.0608.1530.log")
+
+	di := NewDataImporter(nil, &config.Config{
+		Logging: config.LoggingConfig{File: logFile},
+	})
+	if di.errorRecorder == nil {
+		t.Fatal("error recorder should be initialized")
+	}
+	defer di.Close()
+
+	if _, err := os.Stat(filepath.Join(logDir, "migration.log")); !os.IsNotExist(err) {
+		t.Fatalf("default migration.log should not be created, stat err = %v", err)
+	}
+	if di.errorRecorder.file == nil {
+		t.Fatal("error recorder file should be initialized")
+	}
+	if got := di.errorRecorder.file.Name(); got != logFile {
+		t.Fatalf("error recorder file = %q, want %q", got, logFile)
+	}
+}
+
 func TestNewErrorRecorderCreateDir(t *testing.T) {
-	baseDir := os.TempDir()
-	rootName := fmt.Sprintf("migration_nested_%d", time.Now().UnixNano())
-	logPath := filepath.Join(baseDir, rootName, "data", "logs")
+	logPath := filepath.Join(t.TempDir(), "data", "logs", "migration.custom.log")
 
 	recorder, err := NewErrorRecorder(logPath)
 	if err != nil {
 		t.Fatalf("NewErrorRecorder error: %v", err)
 	}
-	defer func() {
-		recorder.Close()
-		os.RemoveAll(filepath.Join(baseDir, rootName))
-	}()
+	defer recorder.Close()
 
 	if recorder.file == nil {
 		t.Fatal("file should be created when dir is created")

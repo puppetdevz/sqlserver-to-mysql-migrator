@@ -1012,15 +1012,16 @@ type ErrorRecord struct {
 }
 
 // NewErrorRecorder 创建错误记录器
-func NewErrorRecorder(logDir string) (*ErrorRecorder, error) {
+func NewErrorRecorder(logFile string) (*ErrorRecorder, error) {
 	recorder := &ErrorRecorder{enabled: true}
 
-	if logDir != "" {
+	if logFile != "" {
+		logDir := filepath.Dir(logFile)
 		if err := os.MkdirAll(logDir, 0755); err != nil {
 			logger.Warnf("Failed to create error log dir: %v", err)
 		} else {
 			f, err := os.OpenFile(
-				filepath.Join(logDir, "migration.log"),
+				logFile,
 				os.O_APPEND|os.O_CREATE|os.O_WRONLY,
 				0644,
 			)
@@ -1136,7 +1137,7 @@ type DataImporter struct {
 
 // NewDataImporter 创建数据导入协调器
 func NewDataImporter(conn *database.Connection, cfg *config.Config) *DataImporter {
-	errorRecorder, err := NewErrorRecorder(filepath.Dir(cfg.Logging.File))
+	errorRecorder, err := NewErrorRecorder(cfg.Logging.File)
 	if err != nil {
 		logger.Warnf("Failed to create error recorder: %v", err)
 	}
@@ -1349,7 +1350,7 @@ type PipelinedImporter struct {
 
 // NewPipelinedImporter 创建流水线导入器
 func NewPipelinedImporter(conn *database.Connection, cfg *config.Config, concurrency int) *PipelinedImporter {
-	errorRecorder, _ := NewErrorRecorder(filepath.Dir(cfg.Logging.File))
+	errorRecorder, _ := NewErrorRecorder(cfg.Logging.File)
 
 	return &PipelinedImporter{
 		conn:          conn,

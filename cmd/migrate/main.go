@@ -122,6 +122,7 @@ func main() {
 	logger.Info("=== Database Migration Tool Started ===")
 	logger.Infof("Version: %s", Version)
 	logger.Infof("Config: %s", cfg.ConfigFilesSummary())
+	migrationStartedAt := time.Now()
 
 	tableScope, err := tablescope.Resolve(*tables, *reimport, *reimportFile)
 	if err != nil {
@@ -170,6 +171,15 @@ func main() {
 	tracker.PrintSummary()
 
 	logger.Info("=== Database Migration Tool Finished ===")
+	logger.Info(formatMigrationTotalDuration(migrationStartedAt, time.Now()))
+}
+
+func formatMigrationTotalDuration(start, end time.Time) string {
+	elapsedSeconds := int64(end.Sub(start).Seconds())
+	if elapsedSeconds < 0 {
+		elapsedSeconds = 0
+	}
+	return fmt.Sprintf("本次迁移工作总耗时: %d 秒", elapsedSeconds)
 }
 
 type migrationRunOptions struct {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
@@ -19,6 +20,17 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/tablescope"
 )
+
+func TestFormatMigrationTotalDurationUsesSeconds(t *testing.T) {
+	start := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	end := start.Add(1250 * time.Millisecond)
+
+	got := formatMigrationTotalDuration(start, end)
+	want := "本次迁移工作总耗时: 1 秒"
+	if got != want {
+		t.Fatalf("formatMigrationTotalDuration() = %q, want %q", got, want)
+	}
+}
 
 func TestCSVNotFoundShouldAdvanceOverallSkip(t *testing.T) {
 	tracker, err := progress.NewTracker()

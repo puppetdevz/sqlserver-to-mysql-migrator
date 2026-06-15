@@ -32,6 +32,45 @@ func TestFormatMigrationTotalDurationUsesSeconds(t *testing.T) {
 	}
 }
 
+func TestMigrationCompletionMessagesAlwaysEndWithDuration(t *testing.T) {
+	start := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	end := start.Add(2250 * time.Millisecond)
+
+	tests := []struct {
+		name string
+		err  error
+		want []string
+	}{
+		{
+			name: "success",
+			err:  nil,
+			want: []string{
+				"=== Database Migration Tool Finished ===",
+				"本次迁移工作总耗时: 2 秒",
+			},
+		},
+		{
+			name: "failure",
+			err:  errors.New("migration failed"),
+			want: []string{
+				"本次迁移工作总耗时: 2 秒",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := migrationCompletionMessages(start, end, tt.err)
+			if strings.Join(got, "\n") != strings.Join(tt.want, "\n") {
+				t.Fatalf("migrationCompletionMessages() = %#v, want %#v", got, tt.want)
+			}
+			if got[len(got)-1] != "本次迁移工作总耗时: 2 秒" {
+				t.Fatalf("last message = %q, want duration", got[len(got)-1])
+			}
+		})
+	}
+}
+
 func TestCSVNotFoundShouldAdvanceOverallSkip(t *testing.T) {
 	tracker, err := progress.NewTracker()
 	if err != nil {

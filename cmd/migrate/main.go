@@ -72,36 +72,44 @@ func logImportDiagnostic(diag *importer.ImportDiagnostic) {
 }
 
 func main() {
+	os.Exit(runCLI())
+}
+
+func runCLI() int {
 	flag.Parse()
 
 	// 显示版本信息
 	if *version {
 		fmt.Printf("db-migration version %s\n", Version)
-		os.Exit(0)
+		return 0
 	}
 
 	// 检测是否启用后缀移除模式
 	if *removePostfix != "" {
 		if *targetDir == "" {
 			fmt.Fprintln(os.Stderr, "Error: --target is required when using --remove-postfix")
-			os.Exit(1)
+			return 1
 		}
 		if err := logger.Init("INFO", "", true, 0, 0, 0); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
+		defer logger.Sync()
 		if err := renameCSVFiles(*removePostfix, *targetDir, *dryRun); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		os.Exit(0)
+		return 0
 	}
+
+	migrationStartedAt := time.Now()
 
 	// 加载配置
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, formatMigrationTotalDuration(migrationStartedAt, time.Now()))
+		return 1
 	}
 	cfg.Logging.File = config.ExpandLogFilePattern(cfg.Logging.File, time.Now())
 
@@ -115,18 +123,24 @@ func main() {
 		cfg.Logging.MaxAge,
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, formatMigrationTotalDuration(migrationStartedAt, time.Now()))
+		return 1
 	}
 	defer logger.Sync()
+	var migrationErr error
+	defer func() {
+		logMigrationCompletion(migrationStartedAt, time.Now(), migrationErr)
+	}()
 
 	logger.Info("=== Database Migration Tool Started ===")
 	logger.Infof("Version: %s", Version)
 	logger.Infof("Config: %s", cfg.ConfigFilesSummary())
-	migrationStartedAt := time.Now()
 
 	tableScope, err := tablescope.Resolve(*tables, *reimport, *reimportFile)
 	if err != nil {
-		logger.Fatalf("Invalid table scope configuration: %v", err)
+		migrationErr = err
+		logger.Errorf("Invalid table scope configuration: %v", err)
+		return 1
 	}
 
 	config.LogEffective(cfg, config.CLIArgs{
@@ -143,14 +157,18 @@ func main() {
 	// 连接数据库
 	conn, err := database.RetryConnectWithMatcher(&cfg.Target, 3, tableMatcher)
 	if err != nil {
-		logger.Fatalf("Failed to connect to database: %v", err)
+		migrationErr = err
+		logger.Errorf("Failed to connect to database: %v", err)
+		return 1
 	}
 	defer conn.Close()
 
 	// 初始化进度跟踪器
 	tracker, err := progress.NewTracker()
 	if err != nil {
-		logger.Fatalf("Failed to initialize progress tracker: %v", err)
+		migrationErr = err
+		logger.Errorf("Failed to initialize progress tracker: %v", err)
+		return 1
 	}
 	defer tracker.Close()
 
@@ -165,13 +183,14 @@ func main() {
 		CreateOnly: *createOnly,
 		TableScope: tableScope,
 	}); err != nil {
-		logger.Fatalf("Migration failed: %v", err)
+		migrationErr = err
+		logger.Errorf("Migration failed: %v", err)
+		return 1
 	}
 
 	tracker.PrintSummary()
 
-	logger.Info("=== Database Migration Tool Finished ===")
-	logger.Info(formatMigrationTotalDuration(migrationStartedAt, time.Now()))
+	return 0
 }
 
 func formatMigrationTotalDuration(start, end time.Time) string {
@@ -180,6 +199,20 @@ func formatMigrationTotalDuration(start, end time.Time) string {
 		elapsedSeconds = 0
 	}
 	return fmt.Sprintf("本次迁移工作总耗时: %d 秒", elapsedSeconds)
+}
+
+func migrationCompletionMessages(start, end time.Time, err error) []string {
+	messages := make([]string, 0, 2)
+	if err == nil {
+		messages = append(messages, "=== Database Migration Tool Finished ===")
+	}
+	return append(messages, formatMigrationTotalDuration(start, end))
+}
+
+func logMigrationCompletion(start, end time.Time, err error) {
+	for _, message := range migrationCompletionMessages(start, end, err) {
+		logger.Info(message)
+	}
 }
 
 type migrationRunOptions struct {

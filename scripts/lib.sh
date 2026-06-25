@@ -153,7 +153,7 @@ get_all_tables() {
           --database="$DB_NAME" \
           --skip-column-names \
           --batch \
-          -e "SHOW TABLES;" 2>/dev/null
+          -e "SHOW TABLES;"
     local status=$?
     unset MYSQL_PWD
     return $status
@@ -199,7 +199,7 @@ ORDER BY CASE object_type
     WHEN 'FUNCTION' THEN 4
     WHEN 'EVENT' THEN 5
     ELSE 6
-END, object_name;" 2>/dev/null
+END, object_name;"
     local status=$?
     unset MYSQL_PWD
     return $status

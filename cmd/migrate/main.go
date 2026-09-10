@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -185,11 +186,18 @@ func runCLI() int {
 	}); err != nil {
 		migrationErr = err
 		logger.Errorf("Migration failed: %v", err)
-		return 1
+		return cliExitCode(err)
 	}
 
 	tracker.PrintSummary()
 
+	return cliExitCode(nil)
+}
+
+func cliExitCode(err error) int {
+	if err != nil {
+		return 1
+	}
 	return 0
 }
 
@@ -256,7 +264,10 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		return fmt.Errorf("failed to parse DDL file: %w", err)
 	}
 	logger.Infof("Parsed %d DDL definitions from %s", len(allDDLs), cfg.Source.DDLFile)
-	ddlLookup := buildDDLLookup(allDDLs, tableMatcher)
+	ddlLookup, err := buildDDLLookup(allDDLs, tableMatcher)
+	if err != nil {
+		return err
+	}
 
 	// 从 DDL 获取所有表名列表
 	allTableNames := collectDDLTableNames(allDDLs)
@@ -307,19 +318,22 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 
 	// ========== 步骤 2: DDL 转换 + 表创建 ==========
+	var stepErrs []error
 	if opts.DryRun {
 		logger.Infof("[DRY RUN] Would create %d missing tables", len(classification.MissingTables))
 		for _, tableName := range classification.MissingTables {
 			logger.Infof("[DRY RUN]   - %s", tableName)
 		}
 	} else if len(classification.MissingTables) > 0 {
-		createFailed, err := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher)
-		if err != nil {
-			logger.Errorf("Some tables failed to create: %v", err)
+		createFailed, createErr := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher, opts.CreateOnly)
+		if createErr != nil {
+			logger.Errorf("Some tables failed to create: %v", createErr)
+			stepErrs = append(stepErrs, createErr)
 		}
 		if len(createFailed) > 0 {
 			if writeErr := writeCreateFailedTables(createFailed); writeErr != nil {
 				logger.Errorf("Failed to write create failed tables file: %v", writeErr)
+				stepErrs = append(stepErrs, writeErr)
 			}
 			allTableNames = tablescope.ExcludeTables(allTableNames, createFailed, tableMatcher)
 			logger.Warnf("Excluded %d create-failed tables from subsequent phases: %v",
@@ -330,9 +344,10 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	if opts.CreateOnly {
 		if err := finalizeCreateOnlyProgress(tracker, classification.ExistingTables); err != nil {
 			logger.Warnf("Failed to finalize create-only progress: %v", err)
+			stepErrs = append(stepErrs, err)
 		}
 		logger.Info("Create tables only mode: skipping data import")
-		return nil
+		return errors.Join(stepErrs...)
 	}
 
 	// ========== 步骤 2.5: TRUNCATE 所有已存在表 ==========
@@ -341,14 +356,14 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	} else if len(classification.ExistingTables) > 0 {
 		if err := truncateExistingTables(conn, classification.ExistingTables, tracker, migrationCtx, cfg); err != nil {
 			logger.Errorf("Failed to truncate existing tables: %v", err)
-			return err
+			return errors.Join(append(stepErrs, err)...)
 		}
 	}
 
 	// ========== 步骤 3: 数据导入 ==========
 	csvFiles, err := scanCSVFiles(cfg.Source.CSVDirectory)
 	if err != nil {
-		return fmt.Errorf("failed to scan CSV files: %w", err)
+		return errors.Join(append(stepErrs, fmt.Errorf("failed to scan CSV files: %w", err))...)
 	}
 	logger.Infof("Found %d CSV files", len(csvFiles))
 
@@ -356,14 +371,15 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		logger.Infof("[DRY RUN] Would import data from %d CSV files into %d tables (skipped)", len(csvFiles), len(allTableNames))
 		if err := previewCSVImport(cfg, csvFiles, allTableNames, classification.ExistingTables, tableMatcher); err != nil {
 			logger.Errorf("Preview analysis failed: %v", err)
+			stepErrs = append(stepErrs, err)
 		}
 	} else {
 		if err := importDataWithCSVMapping(cfg, conn, csvFiles, allTableNames, tracker, migrationCtx, tableMatcher); err != nil {
-			return fmt.Errorf("failed to import data: %w", err)
+			return errors.Join(append(stepErrs, fmt.Errorf("failed to import data: %w", err))...)
 		}
 	}
 
-	return nil
+	return errors.Join(stepErrs...)
 }
 
 // scanCSVFiles 扫描 CSV 文件
@@ -384,7 +400,7 @@ func collectDDLTableNames(allDDLs map[string]*parser.TableDDL) []string {
 	return tableNames
 }
 
-func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.TableNameMatcher) map[string]*parser.TableDDL {
+func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.TableNameMatcher) (map[string]*parser.TableDDL, error) {
 	lookup := make(map[string]*parser.TableDDL, len(allDDLs))
 	tableDDLs := make([]*parser.TableDDL, 0, len(allDDLs))
 	for _, tableDDL := range allDDLs {
@@ -400,12 +416,11 @@ func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.Ta
 	for _, tableDDL := range tableDDLs {
 		key := tableMatcher.Key(tableDDL.TableName)
 		if existing, ok := lookup[key]; ok {
-			logger.Warnf("DDL table name conflict under current case-sensitivity setting: %s and %s", existing.TableName, tableDDL.TableName)
-			continue
+			return nil, fmt.Errorf("DDL table name conflict under current case-sensitivity setting: %s and %s", existing.TableName, tableDDL.TableName)
 		}
 		lookup[key] = tableDDL
 	}
-	return lookup
+	return lookup, nil
 }
 
 // truncateExistingTables 清空所有已存在的表
@@ -470,7 +485,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 }
 
 // createAndTrackTables 创建缺失的表并跟踪结果
-func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher) (failed []string, err error) {
+func createAndTrackTables(cfg *config.Config, conn *database.Connection, missingTables []string, ddlLookup map[string]*parser.TableDDL, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, tableMatcher matcher.TableNameMatcher, createOnly bool) (failed []string, err error) {
 	logger.Infof("Creating %d missing tables...", len(missingTables))
 
 	tracker.StartPhase("create-missing-tables", len(missingTables))
@@ -543,7 +558,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 				}
 
 				logger.Infof("[Worker %d] Table created: %s", workerID, tableName)
-				if *createOnly {
+				if createOnly {
 					if err := tracker.CompleteTable(tableName, 0, 0, 0); err != nil {
 						logger.Warnf("[Worker %d] Failed to mark table %s as completed: %v", workerID, tableName, err)
 					}
@@ -652,6 +667,133 @@ func validateImportedRowCount(counter rowCounter, tableName string, expectedRows
 		ExpectedRows: expectedRows,
 		ActualRows:   actualRows,
 		Valid:        true,
+	}
+}
+
+type importCompletionSink struct {
+	mu             sync.Mutex
+	completedFile  *os.File
+	slowFile       *os.File
+	slowThreshold  time.Duration
+	failedTables   []string
+	mismatchTables []string
+	failedSeen     map[string]struct{}
+	mismatchSeen   map[string]struct{}
+}
+
+func newImportCompletionSink(completedFile, slowFile *os.File, slowThreshold time.Duration) *importCompletionSink {
+	return &importCompletionSink{
+		completedFile: completedFile,
+		slowFile:      slowFile,
+		slowThreshold: slowThreshold,
+		failedSeen:    make(map[string]struct{}),
+		mismatchSeen:  make(map[string]struct{}),
+	}
+}
+
+func (s *importCompletionSink) addFailed(table string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.failedSeen[table]; ok {
+		return
+	}
+	s.failedSeen[table] = struct{}{}
+	s.failedTables = append(s.failedTables, table)
+}
+
+func (s *importCompletionSink) addMismatch(table string) {
+	s.addFailed(table)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.mismatchSeen[table]; ok {
+		return
+	}
+	s.mismatchSeen[table] = struct{}{}
+	s.mismatchTables = append(s.mismatchTables, table)
+}
+
+func (s *importCompletionSink) appendCompleted(table string, elapsed time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.completedFile != nil {
+		if _, err := s.completedFile.WriteString(table + "\n"); err != nil {
+			logger.Warnf("Failed to record completed table %s: %v", table, err)
+		}
+	}
+	if s.slowThreshold > 0 && elapsed > s.slowThreshold {
+		logger.Infof("Table %s exceeded slow threshold: %s > %s",
+			table, elapsed.Truncate(time.Second), s.slowThreshold)
+		if s.slowFile != nil {
+			if _, err := s.slowFile.WriteString(table + "\n"); err != nil {
+				logger.Warnf("Failed to record slow table %s: %v", table, err)
+			}
+		}
+	}
+}
+
+func (s *importCompletionSink) writeLists() error {
+	s.mu.Lock()
+	failed := append([]string(nil), s.failedTables...)
+	mismatch := append([]string(nil), s.mismatchTables...)
+	s.mu.Unlock()
+	return errors.Join(
+		writeTableList(failedTablesFile, failed),
+		writeTableList(rowCountMismatchFile, mismatch),
+	)
+}
+
+func finalizeImportedTable(
+	cfg *config.Config,
+	counter rowCounter,
+	tracker *progress.Tracker,
+	migrationCtx *migration.MigrationContext,
+	sink *importCompletionSink,
+	result *importer.ImportResult,
+	elapsed time.Duration,
+) {
+	if result == nil || result.Skipped {
+		return
+	}
+
+	validationFailed := false
+	if result.Success && result.ErrorCount == 0 && cfg.Migration.ShouldValidateRowCount() {
+		validation := validateImportedRowCount(counter, result.TableName, result.ProcessedRows)
+		logger.Infof("Row count validation: table=%s csv_rows=%d mysql_rows=%d valid=%t",
+			result.TableName, validation.ExpectedRows, validation.ActualRows, validation.Valid)
+		if !validation.Valid {
+			result.Success = false
+			result.ErrorCount++
+			result.ErrorMessage = validation.ErrorMessage
+			validationFailed = true
+			sink.addMismatch(result.TableName)
+			if cfg.Migration.IsFastFail() {
+				migrationCtx.Stop(fmt.Errorf("failed to import table %s: %s", result.TableName, validation.ErrorMessage))
+			}
+		}
+	}
+
+	if result.Success && result.ErrorCount == 0 {
+		if err := tracker.SetTableTotalRows(result.TableName, result.TotalRows); err != nil {
+			logger.Warnf("Failed to set total rows for %s: %v", result.TableName, err)
+		}
+		if err := tracker.CompleteTable(result.TableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
+			logger.Warnf("Failed to mark table %s as completed: %v", result.TableName, err)
+		}
+		tracker.CompletePhaseItem()
+		sink.appendCompleted(result.TableName, elapsed)
+		return
+	}
+
+	failMsg := result.ErrorMessage
+	if failMsg == "" {
+		failMsg = fmt.Sprintf("partial import: %d row errors", result.ErrorCount)
+	}
+	if err := tracker.FailTable(result.TableName, failMsg); err != nil {
+		logger.Warnf("Failed to mark table %s as failed: %v", result.TableName, err)
+	}
+	tracker.FailPhaseItem()
+	if !validationFailed {
+		sink.addFailed(result.TableName)
 	}
 }
 
@@ -773,12 +915,18 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 		defer slowFile.Close()
 	}
 
+	slowThreshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
+	sink := newImportCompletionSink(completedFile, slowFile, slowThreshold)
+
 	if cfg.Migration.ShouldUseAdaptiveImport() {
-		results, failedTables, err := importDataAdaptive(conn, cfg, tablesToImport, csvTableMap, tableMatcher, tracker, migrationCtx, dataImporter, completedFile, slowFile)
+		results, failedTables, err := importDataAdaptive(conn, cfg, tablesToImport, csvTableMap, tableMatcher, tracker, migrationCtx, dataImporter, sink)
 		successCount := 0
 		failCount := 0
 		var totalRows int64
 		for _, result := range results {
+			if result.Skipped {
+				continue
+			}
 			if result.Success && result.ErrorCount == 0 {
 				successCount++
 			} else {
@@ -792,13 +940,12 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 			successCount, failCount, totalRows)
 		generateMigrationReport("Data Import Report", nil, successCount, failCount, failedTables)
 
+		writeErr := sink.writeLists()
 		if err != nil {
-			return err
+			return errors.Join(err, writeErr)
 		}
-		return finalError(failCount, "tables failed to import", migrationCtx)
+		return errors.Join(finalError(failCount, "tables failed to import", migrationCtx), writeErr)
 	}
-
-	slowThreshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
 
 	// 使用 worker pool 并发导入
 	var wg sync.WaitGroup
@@ -835,6 +982,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 					resultChan <- &importer.ImportResult{
 						TableName:     tableName,
 						Success:       true, // CSV不存在不算失败，只是没有数据
+						Skipped:       true,
 						InsertedRows:  0,
 						ProcessedRows: 0,
 						ErrorCount:    0,
@@ -852,63 +1000,39 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				if err != nil {
 					logger.Errorf("[Worker %d] Failed to import table %s: %v", workerID, tableName, err)
 					logImportDiagnostic(diag)
-					tracker.FailTable(tableName, err.Error())
-					tracker.FailPhaseItem()
-					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
-						stopErr := fmt.Errorf("failed to import table %s: %w", tableName, err)
-						migrationCtx.Stop(stopErr)
-						resultChan <- &importer.ImportResult{
-							TableName:    tableName,
-							Success:      false,
-							ErrorMessage: stopErr.Error(),
-						}
-						return
-					}
-					resultChan <- &importer.ImportResult{
+					failed := &importer.ImportResult{
 						TableName:    tableName,
 						Success:      false,
 						ErrorMessage: err.Error(),
 					}
+					if result != nil {
+						failed.ProcessedRows = result.ProcessedRows
+						failed.InsertedRows = result.InsertedRows
+						failed.ErrorCount = result.ErrorCount
+						if failed.ErrorCount == 0 {
+							failed.ErrorCount = 1
+						}
+					}
+					finalizeImportedTable(cfg, conn, tracker, migrationCtx, sink, failed, elapsed)
+					if cfg.Migration.IsFastFail() {
+						stopErr := fmt.Errorf("failed to import table %s: %w", tableName, err)
+						migrationCtx.Stop(stopErr)
+						failed.ErrorMessage = stopErr.Error()
+						resultChan <- failed
+						return
+					}
+					resultChan <- failed
 					continue
 				}
 
-				if result.Success {
+				finalizeImportedTable(cfg, conn, tracker, migrationCtx, sink, result, elapsed)
+				if result.Success && result.ErrorCount == 0 {
 					logger.Infof("[Worker %d] Table imported: %s (%d rows)", workerID, tableName, result.InsertedRows)
-					if err := tracker.SetTableTotalRows(tableName, result.TotalRows); err != nil {
-						logger.Warnf("[Worker %d] Failed to set total rows for %s: %v", workerID, tableName, err)
-					}
-					if err := tracker.CompleteTable(tableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
-						logger.Warnf("[Worker %d] Failed to mark table %s as completed: %v", workerID, tableName, err)
-					}
-					tracker.CompletePhaseItem()
-
-					if completedFile != nil {
-						if _, err := completedFile.WriteString(tableName + "\n"); err != nil {
-							logger.Warnf("[Worker %d] Failed to record completed table %s: %v", workerID, tableName, err)
-						}
-					}
-
-					if elapsed > slowThreshold {
-						logger.Infof("[Worker %d] Table %s exceeded slow threshold: %s > %s",
-							workerID, tableName, elapsed.Truncate(time.Second), slowThreshold)
-						if slowFile != nil {
-							if _, err := slowFile.WriteString(tableName + "\n"); err != nil {
-								logger.Warnf("[Worker %d] Failed to record slow table %s: %v",
-									workerID, tableName, err)
-							}
-						}
-					}
-
-					resultChan <- result
 				} else {
 					logger.Warnf("[Worker %d] Table partially imported: %s (%d rows, %d errors)",
 						workerID, tableName, result.InsertedRows, result.ErrorCount)
-					if err := tracker.FailTable(tableName, fmt.Sprintf("partial import: %d row errors", result.ErrorCount)); err != nil {
-						logger.Warnf("[Worker %d] Failed to mark table %s as failed: %v", workerID, tableName, err)
-					}
-					tracker.FailPhaseItem()
-					resultChan <- result
 				}
+				resultChan <- result
 			}
 		}(i)
 	}
@@ -930,6 +1054,9 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	var totalRows int64
 
 	for result := range resultChan {
+		if result.Skipped {
+			continue
+		}
 		if result.Success && result.ErrorCount == 0 {
 			successCount++
 		} else {
@@ -948,7 +1075,8 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	// 生成数据导入报告
 	generateMigrationReport("Data Import Report", nil, successCount, failCount, failedTables)
 
-	return finalError(failCount, "tables failed to import", migrationCtx)
+	writeErr := sink.writeLists()
+	return errors.Join(finalError(failCount, "tables failed to import", migrationCtx), writeErr)
 }
 
 func importDataAdaptive(
@@ -960,13 +1088,10 @@ func importDataAdaptive(
 	tracker *progress.Tracker,
 	migrationCtx *migration.MigrationContext,
 	dataImporter *importer.DataImporter,
-	completedFile *os.File,
-	slowFile *os.File,
+	sink *importCompletionSink,
 ) ([]*importer.ImportResult, []string, error) {
 	candidates, skipped := buildImportCandidates(tablesToImport, csvTableMap, tableMatcher, cfg)
 	results := make([]*importer.ImportResult, 0, len(tablesToImport))
-	var failedTables []string
-	var mismatchTables []string
 
 	for _, skippedTable := range skipped {
 		_, _, diag := dataImporter.FindCSVFile(skippedTable.TableName)
@@ -978,6 +1103,7 @@ func importDataAdaptive(
 		results = append(results, &importer.ImportResult{
 			TableName:     skippedTable.TableName,
 			Success:       true,
+			Skipped:       true,
 			InsertedRows:  0,
 			ProcessedRows: 0,
 			ErrorCount:    0,
@@ -1003,8 +1129,6 @@ func importDataAdaptive(
 	workerSlots := make(chan struct{}, maxWorkers)
 	resultChan := make(chan *importer.ImportResult, len(candidates))
 	var wg sync.WaitGroup
-	var fileMu sync.Mutex
-	slowThreshold := time.Duration(cfg.Migration.EffectiveSlowTableThresholdMinutes()) * time.Minute
 
 	for _, candidate := range candidates {
 		if migrationCtx.Err() != nil {
@@ -1033,61 +1157,24 @@ func importDataAdaptive(
 			if err != nil {
 				logger.Errorf("Failed to import table %s: %v", candidate.TableName, err)
 				logImportDiagnostic(diag)
-				if trackErr := tracker.FailTable(candidate.TableName, err.Error()); trackErr != nil {
-					logger.Warnf("Failed to mark table %s as failed: %v", candidate.TableName, trackErr)
+				failed := &importer.ImportResult{TableName: candidate.TableName, Success: false, ErrorMessage: err.Error()}
+				if result != nil {
+					failed.ProcessedRows = result.ProcessedRows
+					failed.InsertedRows = result.InsertedRows
+					failed.ErrorCount = result.ErrorCount
+					if failed.ErrorCount == 0 {
+						failed.ErrorCount = 1
+					}
 				}
-				tracker.FailPhaseItem()
-				resultChan <- &importer.ImportResult{TableName: candidate.TableName, Success: false, ErrorMessage: err.Error()}
+				finalizeImportedTable(cfg, conn, tracker, migrationCtx, sink, failed, elapsed)
+				resultChan <- failed
 				if cfg.Migration.IsFastFail() {
 					migrationCtx.Stop(fmt.Errorf("failed to import table %s: %w", candidate.TableName, err))
 				}
 				return
 			}
 
-			if result.Success && cfg.Migration.ShouldValidateRowCount() {
-				validation := validateImportedRowCount(conn, candidate.TableName, result.ProcessedRows)
-				logger.Infof("Row count validation: table=%s csv_rows=%d mysql_rows=%d valid=%t",
-					candidate.TableName, validation.ExpectedRows, validation.ActualRows, validation.Valid)
-				if !validation.Valid {
-					result.Success = false
-					result.ErrorCount++
-					result.ErrorMessage = validation.ErrorMessage
-					fileMu.Lock()
-					mismatchTables = append(mismatchTables, candidate.TableName)
-					fileMu.Unlock()
-				}
-			}
-
-			if result.Success && result.ErrorCount == 0 {
-				if err := tracker.SetTableTotalRows(candidate.TableName, result.TotalRows); err != nil {
-					logger.Warnf("Failed to set total rows for %s: %v", candidate.TableName, err)
-				}
-				if err := tracker.CompleteTable(candidate.TableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
-					logger.Warnf("Failed to mark table %s as completed: %v", candidate.TableName, err)
-				}
-				tracker.CompletePhaseItem()
-				fileMu.Lock()
-				if completedFile != nil {
-					if _, err := completedFile.WriteString(candidate.TableName + "\n"); err != nil {
-						logger.Warnf("Failed to record completed table %s: %v", candidate.TableName, err)
-					}
-				}
-				if elapsed > slowThreshold {
-					logger.Infof("Table %s exceeded slow threshold: %s > %s",
-						candidate.TableName, elapsed.Truncate(time.Second), slowThreshold)
-					if slowFile != nil {
-						if _, err := slowFile.WriteString(candidate.TableName + "\n"); err != nil {
-							logger.Warnf("Failed to record slow table %s: %v", candidate.TableName, err)
-						}
-					}
-				}
-				fileMu.Unlock()
-			} else {
-				if err := tracker.FailTable(candidate.TableName, result.ErrorMessage); err != nil {
-					logger.Warnf("Failed to mark table %s as failed: %v", candidate.TableName, err)
-				}
-				tracker.FailPhaseItem()
-			}
+			finalizeImportedTable(cfg, conn, tracker, migrationCtx, sink, result, elapsed)
 			resultChan <- result
 		}(candidate)
 	}
@@ -1095,17 +1182,15 @@ func importDataAdaptive(
 	wg.Wait()
 	close(resultChan)
 
+	var failedTables []string
 	for result := range resultChan {
 		results = append(results, result)
+		if result.Skipped {
+			continue
+		}
 		if !result.Success || result.ErrorCount > 0 {
 			failedTables = append(failedTables, result.TableName)
 		}
-	}
-	if err := writeTableList(failedTablesFile, failedTables); err != nil {
-		logger.Warnf("Failed to write %s: %v", failedTablesFile, err)
-	}
-	if err := writeTableList(rowCountMismatchFile, mismatchTables); err != nil {
-		logger.Warnf("Failed to write %s: %v", rowCountMismatchFile, err)
 	}
 	return results, failedTables, finalError(len(failedTables), "tables failed to import", migrationCtx)
 }

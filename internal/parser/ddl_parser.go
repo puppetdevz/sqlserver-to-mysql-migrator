@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -69,8 +70,10 @@ func (p *DDLParser) ParseAll() (map[string]*TableDDL, error) {
 			continue
 		}
 		if tableDDL != nil {
-			// 使用大写表名作为 key
-			tables[strings.ToUpper(tableDDL.TableName)] = tableDDL
+			if existing, ok := tables[tableDDL.TableName]; ok {
+				return nil, fmt.Errorf("duplicate table definition for %q (conflicts with existing %q)", tableDDL.TableName, existing.TableName)
+			}
+			tables[tableDDL.TableName] = tableDDL
 		}
 	}
 
@@ -84,10 +87,26 @@ func (p *DDLParser) ParseTable(tableName string) (*TableDDL, error) {
 		return nil, err
 	}
 
-	// 查找表（不区分大小写）
-	upperTableName := strings.ToUpper(tableName)
-	if table, ok := tables[upperTableName]; ok {
+	if table, ok := tables[tableName]; ok {
 		return table, nil
+	}
+
+	var matches []*TableDDL
+	for name, table := range tables {
+		if strings.EqualFold(name, tableName) {
+			matches = append(matches, table)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		names := make([]string, 0, len(matches))
+		for _, table := range matches {
+			names = append(names, table.TableName)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("ambiguous table name %q: matches %s", tableName, strings.Join(names, ", "))
 	}
 
 	return nil, fmt.Errorf("table not found: %s", tableName)

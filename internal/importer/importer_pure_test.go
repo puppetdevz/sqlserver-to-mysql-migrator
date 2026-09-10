@@ -137,7 +137,10 @@ func TestRepairDelimitedRowNoExtraFields(t *testing.T) {
 		{Name: "name", Type: "varchar"},
 		{Name: "date", Type: "date"},
 	}
-	result := repairDelimitedRow(row, infos)
+	result, err := repairDelimitedRow(row, infos)
+	if err != nil {
+		t.Fatalf("repairDelimitedRow() error = %v", err)
+	}
 	if !reflect.DeepEqual(result, row) {
 		t.Fatalf("row should be unchanged, got %v", result)
 	}
@@ -146,9 +149,16 @@ func TestRepairDelimitedRowNoExtraFields(t *testing.T) {
 func TestRepairDelimitedRowEmptyColumns(t *testing.T) {
 	row := []string{"a", "b", "c"}
 	infos := []dbColumnInfo{}
-	result := repairDelimitedRow(row, infos)
-	if !reflect.DeepEqual(result, row) {
-		t.Fatalf("row should be unchanged with empty columnInfo, got %v", result)
+	result, err := repairDelimitedRow(row, infos)
+	if err == nil {
+		t.Fatalf("expected empty-layout error, got row %v", result)
+	}
+	if result != nil {
+		t.Fatalf("result = %v, want nil", result)
+	}
+	var repairErr *csvRepairError
+	if !errors.As(err, &repairErr) || repairErr.Reason != "empty column layout" {
+		t.Fatalf("err = %v, want empty column layout", err)
 	}
 }
 
@@ -449,7 +459,6 @@ func TestScoreValueForColumnTypeAbsorbableTypes(t *testing.T) {
 // ============================================================================
 
 func TestRepairDelimitedRowAllAbsorbable(t *testing.T) {
-	// All columns can absorb, first column wins with highest score
 	row := []string{"1", "hello", "world", "42", "2020-01-01"}
 	infos := []dbColumnInfo{
 		{Name: "id", Type: "int"},
@@ -457,14 +466,17 @@ func TestRepairDelimitedRowAllAbsorbable(t *testing.T) {
 		{Name: "age", Type: "int"},
 		{Name: "date", Type: "date"},
 	}
-	result := repairDelimitedRow(row, infos)
-	if len(result) != 4 {
-		t.Fatalf("len = %d, want 4", len(result))
+	result, err := repairDelimitedRow(row, infos)
+	if err != nil {
+		t.Fatalf("repairDelimitedRow() error = %v", err)
+	}
+	want := []string{"1", "hello,world", "42", "2020-01-01"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("got %v, want unique best candidate %v", result, want)
 	}
 }
 
 func TestRepairDelimitedRowWithNonAbsorbableColumn(t *testing.T) {
-	// Column 1 ("gkp") is non-absorbable, cannot be selected as absorbIdx
 	row := []string{"1", "gkp_val", "hello", "world", "42"}
 	infos := []dbColumnInfo{
 		{Name: "id", Type: "int"},
@@ -472,24 +484,97 @@ func TestRepairDelimitedRowWithNonAbsorbableColumn(t *testing.T) {
 		{Name: "desc", Type: "varchar"},
 		{Name: "age", Type: "int"},
 	}
-	result := repairDelimitedRow(row, infos)
-	if len(result) != 4 {
-		t.Fatalf("len = %d, want 4", len(result))
+	result, err := repairDelimitedRow(row, infos)
+	if err != nil {
+		t.Fatalf("repairDelimitedRow() error = %v", err)
+	}
+	want := []string{"1", "gkp_val", "hello,world", "42"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("got %v, want %v", result, want)
 	}
 }
 
-func TestRepairDelimitedRowExtraFieldsOutOfRange(t *testing.T) {
-	// absorbIdx + extraFields >= len(row) → skip
+func TestRepairDelimitedRowAmbiguousTextColumns(t *testing.T) {
+	row := []string{"Alice", "Bob", "Carol"}
+	infos := []dbColumnInfo{
+		{Name: "first", Type: "text"},
+		{Name: "second", Type: "text"},
+	}
+	result, err := repairDelimitedRow(row, infos)
+	if err == nil {
+		t.Fatalf("expected ambiguity error, got guess %v", result)
+	}
+	if result != nil {
+		t.Fatalf("result = %v, want nil (must not return a guessed row)", result)
+	}
+	var repairErr *csvRepairError
+	if !errors.As(err, &repairErr) || repairErr.Reason != "ambiguous CSV field repair" {
+		t.Fatalf("err = %v, want ambiguous CSV field repair", err)
+	}
+}
+
+func TestRepairDelimitedRowUniqueTypedCandidate(t *testing.T) {
+	row := []string{"1", "hello", "world", "2020-01-01"}
+	infos := []dbColumnInfo{
+		{Name: "id", Type: "int"},
+		{Name: "name", Type: "varchar"},
+		{Name: "created", Type: "date"},
+	}
+	result, err := repairDelimitedRow(row, infos)
+	if err != nil {
+		t.Fatalf("repairDelimitedRow() error = %v", err)
+	}
+	want := []string{"1", "hello,world", "2020-01-01"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("got %v, want %v", result, want)
+	}
+}
+
+func TestRepairDelimitedRowNoCandidate(t *testing.T) {
 	row := []string{"a", "b", "c"}
 	infos := []dbColumnInfo{
-		{Name: "col", Type: "varchar"},
-		{Name: "extra", Type: "text"},
+		{Name: "id", Type: "int"},
+		{Name: "age", Type: "int"},
 	}
-	// extraFields=1, i=0 candidate ["a,b","c"] → score 2, i=1 candidate ["a","b,c"] → score 2
-	// bestIdx=0 → collapse at 0: ["a,b", "c"] → len 2
-	result := repairDelimitedRow(row, infos)
-	if len(result) != 2 {
-		t.Fatalf("len = %d, want 2", len(result))
+	result, err := repairDelimitedRow(row, infos)
+	if err == nil {
+		t.Fatalf("expected no-candidate error, got %v", result)
+	}
+	var repairErr *csvRepairError
+	if !errors.As(err, &repairErr) || repairErr.Reason != "no valid CSV field repair candidate" {
+		t.Fatalf("err = %v, want no valid CSV field repair candidate", err)
+	}
+}
+
+func TestRepairDelimitedRowShortRow(t *testing.T) {
+	row := []string{"only"}
+	infos := []dbColumnInfo{
+		{Name: "id", Type: "int"},
+		{Name: "name", Type: "text"},
+	}
+	result, err := repairDelimitedRow(row, infos)
+	if err == nil {
+		t.Fatalf("expected short-row error, got %v", result)
+	}
+	var repairErr *csvRepairError
+	if !errors.As(err, &repairErr) || repairErr.Reason != "short row" {
+		t.Fatalf("err = %v, want short row", err)
+	}
+}
+
+func TestRepairDelimitedRowExplicitEmptyFieldsRemainValid(t *testing.T) {
+	row := []string{"1", "", "2020-01-01"}
+	infos := []dbColumnInfo{
+		{Name: "id", Type: "int"},
+		{Name: "name", Type: "varchar"},
+		{Name: "date", Type: "date"},
+	}
+	result, err := repairDelimitedRow(row, infos)
+	if err != nil {
+		t.Fatalf("explicit empty fields should be valid: %v", err)
+	}
+	if !reflect.DeepEqual(result, row) {
+		t.Fatalf("got %v, want %v", result, row)
 	}
 }
 
@@ -923,13 +1008,24 @@ func TestBatchInserterDefaultContextIsBackground(t *testing.T) {
 }
 
 func TestBatchRetryPolicyUsesLongerBackoffForConnectionErrors(t *testing.T) {
-	attempts, baseDelay := batchRetryPolicy(fmt.Errorf("wrapped: %w", driver.ErrBadConn))
+	attempts, baseDelay := batchRetryPolicy(prepareStageConnErr())
 
 	if attempts != maxConnectionRetries {
 		t.Fatalf("attempts = %d, want %d", attempts, maxConnectionRetries)
 	}
 	if baseDelay != connectionRetryBaseDelay {
 		t.Fatalf("baseDelay = %s, want %s", baseDelay, connectionRetryBaseDelay)
+	}
+}
+
+func TestBatchRetryPolicyDoesNotRetryUnknownCommit(t *testing.T) {
+	attempts, _ := batchRetryPolicy(execStageConnErr())
+	if attempts != 1 {
+		t.Fatalf("exec-stage attempts = %d, want 1", attempts)
+	}
+	attempts, _ = batchRetryPolicy(fmt.Errorf("wrapped: %w", driver.ErrBadConn))
+	if attempts != 1 {
+		t.Fatalf("unstaged connection attempts = %d, want 1", attempts)
 	}
 }
 
@@ -1100,11 +1196,19 @@ func noRetryWait(time.Duration) error {
 	return nil
 }
 
+func prepareStageConnErr() error {
+	return &insertStageError{Stage: insertStagePrepare, Err: driver.ErrBadConn}
+}
+
+func execStageConnErr() error {
+	return &insertStageError{Stage: insertStageExec, Err: driver.ErrBadConn}
+}
+
 func TestAdaptiveBatchInsertRetriesOriginalBatchBeforeSplit(t *testing.T) {
 	inserter := &scriptedBatchInserter{
 		results: []scriptedInsertResult{
-			{err: driver.ErrBadConn},
-			{err: driver.ErrBadConn},
+			{err: prepareStageConnErr()},
+			{err: prepareStageConnErr()},
 			{affected: 2},
 			{affected: 2},
 		},
@@ -1156,7 +1260,7 @@ func TestAdaptiveBatchInsertReturnsContextErrorDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	inserter := &scriptedBatchInserter{
-		results: []scriptedInsertResult{{err: driver.ErrBadConn}},
+		results: []scriptedInsertResult{{err: prepareStageConnErr()}},
 	}
 	rows := [][]interface{}{{1}, {2}}
 
@@ -1167,5 +1271,78 @@ func TestAdaptiveBatchInsertReturnsContextErrorDuringBackoff(t *testing.T) {
 	}
 	if result.split {
 		t.Fatal("split = true, want false when context cancels before retry")
+	}
+}
+
+func TestAdaptiveBatchInsertExecConnectionErrorIsUnknownCommit(t *testing.T) {
+	inserter := &scriptedBatchInserter{
+		results: []scriptedInsertResult{{err: execStageConnErr()}},
+	}
+	rows := [][]interface{}{{1}, {2}}
+
+	result := insertBatchWithAdaptiveRetry(context.Background(), inserter, "orders", 3, rows, noRetryWait)
+
+	if !errors.Is(result.err, ErrUnknownCommit) {
+		t.Fatalf("err = %v, want ErrUnknownCommit", result.err)
+	}
+	if result.split {
+		t.Fatal("split = true, want false for unknown commit")
+	}
+	if result.consumedRows != 0 {
+		t.Fatalf("consumedRows = %d, want 0", result.consumedRows)
+	}
+	if !reflect.DeepEqual(inserter.calls, []int{2}) {
+		t.Fatalf("calls = %v, want [2] (no replay)", inserter.calls)
+	}
+}
+
+func TestAdaptiveBatchInsertUnstagedConnectionErrorIsUnknownCommit(t *testing.T) {
+	inserter := &scriptedBatchInserter{
+		results: []scriptedInsertResult{{err: driver.ErrBadConn}},
+	}
+	rows := [][]interface{}{{1}, {2}}
+
+	result := insertBatchWithAdaptiveRetry(context.Background(), inserter, "orders", 3, rows, noRetryWait)
+
+	if !errors.Is(result.err, ErrUnknownCommit) && !isUnknownCommitError(result.err) {
+		t.Fatalf("err = %v, want unknown-commit treatment", result.err)
+	}
+	if !reflect.DeepEqual(inserter.calls, []int{2}) {
+		t.Fatalf("calls = %v, want [2] (no replay of unstaged connection error)", inserter.calls)
+	}
+}
+
+func TestAdaptiveBatchInsertSplitKeepsLeftProgressWhenRightExhausts(t *testing.T) {
+	results := []scriptedInsertResult{
+		{err: prepareStageConnErr()},
+		{err: prepareStageConnErr()},
+		{affected: 1},
+	}
+	for i := 0; i < maxConnectionRetries; i++ {
+		results = append(results, scriptedInsertResult{err: prepareStageConnErr()})
+	}
+	inserter := &scriptedBatchInserter{results: results}
+	rows := [][]interface{}{{1}, {2}}
+
+	result := insertBatchWithAdaptiveRetry(context.Background(), inserter, "orders", 3, rows, noRetryWait)
+
+	if result.err == nil {
+		t.Fatal("expected right-half retry exhaustion")
+	}
+	if !result.split {
+		t.Fatal("split = false, want true")
+	}
+	if result.consumedRows != 1 {
+		t.Fatalf("consumedRows = %d, want 1 (left half kept)", result.consumedRows)
+	}
+	if result.affectedRows != 1 {
+		t.Fatalf("affectedRows = %d, want 1", result.affectedRows)
+	}
+	wantCalls := []int{2, 2, 1}
+	for i := 0; i < maxConnectionRetries; i++ {
+		wantCalls = append(wantCalls, 1)
+	}
+	if !reflect.DeepEqual(inserter.calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", inserter.calls, wantCalls)
 	}
 }

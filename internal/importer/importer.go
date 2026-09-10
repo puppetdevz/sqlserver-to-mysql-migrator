@@ -119,7 +119,7 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	result, err, diag := ti.pipelinedImport(file, actualTableName, csvTotalRows)
 	if err != nil {
 		ti.errorRecorder.RecordError(ti.tableName, "", nil, err)
-		return nil, err, diag
+		return result, err, diag
 	}
 
 	return result, nil, nil
@@ -256,29 +256,86 @@ func alignColumnInfos(headers []string, dbColumnInfos []dbColumnInfo) []dbColumn
 	return aligned
 }
 
-func repairDelimitedRow(row []string, columnInfos []dbColumnInfo) []string {
-	extraFields := len(row) - len(columnInfos)
-	if extraFields <= 0 || len(columnInfos) == 0 {
-		return row
+type csvRepairError struct {
+	Reason   string
+	Expected int
+	Actual   int
+}
+
+func (e *csvRepairError) Error() string {
+	if e == nil {
+		return "CSV repair error"
+	}
+	return fmt.Sprintf("%s (expected %d fields, got %d)", e.Reason, e.Expected, e.Actual)
+}
+
+// CSVStructureError is a per-record CSV layout error that must not be written.
+type CSVStructureError struct {
+	TableName    string
+	CSVPath      string
+	RecordNumber int64
+	Expected     int
+	Actual       int
+	Reason       string
+}
+
+func (e *CSVStructureError) Error() string {
+	if e == nil {
+		return "CSV structure error"
+	}
+	return fmt.Sprintf("CSV structure error: table=%s file=%s record=%d expected_fields=%d actual_fields=%d reason=%s",
+		e.TableName, e.CSVPath, e.RecordNumber, e.Expected, e.Actual, e.Reason)
+}
+
+func repairDelimitedRow(row []string, columnInfos []dbColumnInfo) ([]string, error) {
+	expected := len(columnInfos)
+	actual := len(row)
+	if expected == 0 {
+		if actual == 0 {
+			return row, nil
+		}
+		return nil, &csvRepairError{Reason: "empty column layout", Expected: 0, Actual: actual}
+	}
+	if actual == expected {
+		return row, nil
+	}
+	if actual < expected {
+		return nil, &csvRepairError{Reason: "short row", Expected: expected, Actual: actual}
 	}
 
-	bestIdx := -1
+	extraFields := actual - expected
 	bestScore := -1 << 30
+	var best [][]string
+	seen := make(map[string]struct{})
 	for i, info := range columnInfos {
 		if !canAbsorbDelimitedFields(info.Type) || i+extraFields >= len(row) {
 			continue
 		}
 		candidate := collapseDelimitedFields(row, i, extraFields)
 		score := scoreRowAgainstColumnTypes(candidate, columnInfos)
-		if score > bestScore {
-			bestIdx = i
+		if score < 0 {
+			continue
+		}
+		key := strings.Join(candidate, "\x00")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		switch {
+		case score > bestScore:
 			bestScore = score
+			best = [][]string{candidate}
+		case score == bestScore:
+			best = append(best, candidate)
 		}
 	}
-	if bestIdx < 0 || bestScore < 0 {
-		return row
+	if len(best) == 0 {
+		return nil, &csvRepairError{Reason: "no valid CSV field repair candidate", Expected: expected, Actual: actual}
 	}
-	return collapseDelimitedFields(row, bestIdx, extraFields)
+	if len(best) > 1 {
+		return nil, &csvRepairError{Reason: "ambiguous CSV field repair", Expected: expected, Actual: actual}
+	}
+	return best[0], nil
 }
 
 func collapseDelimitedFields(row []string, absorbIdx, extraFields int) []string {
@@ -388,6 +445,13 @@ func filterRowData(row []any, mapping []int) []any {
 	return result
 }
 
+// batchData is a pipeline unit from the CSV reader to the DB writer.
+type batchData struct {
+	rows     [][]any
+	batchNum int
+	err      error
+}
+
 // batchResult 批次处理结果（从 DB writer → 主 goroutine）
 type batchResult struct {
 	batchNum     int
@@ -401,6 +465,7 @@ type batchInserter interface {
 }
 
 type adaptiveBatchInsertResult struct {
+	consumedRows int
 	affectedRows int64
 	retries      int
 	split        bool
@@ -413,6 +478,17 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func sendPipelineBatch(ctx context.Context, batchChan chan<- batchData, csvDone <-chan struct{}, bd batchData) bool {
+	select {
+	case batchChan <- bd:
+		return true
+	case <-csvDone:
+		return false
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -429,10 +505,35 @@ func insertBatchWithAdaptiveRetry(
 			return waitForRetry(ctx, delay)
 		}
 	}
-	return insertBatchWithAdaptiveRetryDepth(ctx, inserter, tableName, batchNum, rows, wait, 0)
+	ranges := planRangesForInserter(inserter, rows)
+	var total adaptiveBatchInsertResult
+	for _, r := range ranges {
+		res := insertRangeWithAdaptiveRetryDepth(ctx, inserter, tableName, batchNum, rows[r.Start:r.End], wait, 0)
+		total.consumedRows += res.consumedRows
+		total.affectedRows += res.affectedRows
+		total.retries += res.retries
+		total.split = total.split || res.split
+		if res.err != nil {
+			total.err = res.err
+			return total
+		}
+	}
+	return total
 }
 
-func insertBatchWithAdaptiveRetryDepth(
+func planRangesForInserter(inserter batchInserter, rows [][]any) []insertRange {
+	if planner, ok := inserter.(interface {
+		PlanInsertRanges([][]any) []insertRange
+	}); ok {
+		return planner.PlanInsertRanges(rows)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return []insertRange{{Start: 0, End: len(rows)}}
+}
+
+func insertRangeWithAdaptiveRetryDepth(
 	ctx context.Context,
 	inserter batchInserter,
 	tableName string,
@@ -444,24 +545,31 @@ func insertBatchWithAdaptiveRetryDepth(
 	for retry := 0; ; retry++ {
 		affected, err := inserter.InsertBatch(rows)
 		if err == nil {
-			return adaptiveBatchInsertResult{affectedRows: affected, retries: retry}
+			return adaptiveBatchInsertResult{consumedRows: len(rows), affectedRows: affected, retries: retry}
+		}
+		if isUnknownCommitError(err) {
+			if !errors.Is(err, ErrUnknownCommit) {
+				err = fmt.Errorf("%w: %w", ErrUnknownCommit, err)
+			}
+			return adaptiveBatchInsertResult{retries: retry, err: err}
 		}
 
 		attempts, baseDelay := batchRetryPolicy(err)
-		canSplit := isRetryableConnectionError(err) && retry >= 1 && len(rows) > 1 && depth < maxSplitDepth
+		canSplit := isRetryablePrepareConnectionError(err) && retry >= 1 && len(rows) > 1 && depth < maxSplitDepth
 		if canSplit {
 			mid := len(rows) / 2
 			logger.Warnf("Connection retry batch split: table=%s batch=%d rows=%d split_rows=%d/%d reason=%v",
 				tableName, batchNum, len(rows), mid, len(rows)-mid, err)
 
-			left := insertBatchWithAdaptiveRetryDepth(ctx, inserter, tableName, batchNum, rows[:mid], wait, depth+1)
+			left := insertRangeWithAdaptiveRetryDepth(ctx, inserter, tableName, batchNum, rows[:mid], wait, depth+1)
 			if left.err != nil {
 				left.retries += retry
 				left.split = true
 				return left
 			}
 
-			right := insertBatchWithAdaptiveRetryDepth(ctx, inserter, tableName, batchNum, rows[mid:], wait, depth+1)
+			right := insertRangeWithAdaptiveRetryDepth(ctx, inserter, tableName, batchNum, rows[mid:], wait, depth+1)
+			right.consumedRows += left.consumedRows
 			right.affectedRows += left.affectedRows
 			right.retries += left.retries + retry
 			right.split = true
@@ -482,10 +590,13 @@ func insertBatchWithAdaptiveRetryDepth(
 }
 
 func batchRetryPolicy(err error) (int, time.Duration) {
+	if isUnknownCommitError(err) {
+		return 1, 0
+	}
 	if isDatabaseCapacityError(err) {
 		return 1, 0
 	}
-	if isRetryableConnectionError(err) {
+	if isRetryablePrepareConnectionError(err) {
 		return maxConnectionRetries, connectionRetryBaseDelay
 	}
 	return maxRetries, retryDelay
@@ -737,12 +848,6 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	}
 
 	// 建立流水线：CSV读取 -> 预处理 -> 数据库插入
-	type batchData struct {
-		rows     [][]any
-		batchNum int
-		err      error
-	}
-
 	var csvDoneOnce sync.Once
 	csvDone := make(chan struct{})
 	batchChan := make(chan batchData, bufferSize)
@@ -764,16 +869,15 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		defer close(aggregatorDone)
 
 		for result := range resultChan {
+			processedRows += int64(result.rowCount)
+			totalRows += result.affectedRows
 			if result.err != nil {
 				errorCount++
 				lastErr = result.err
-				logger.Debugf("[Aggregator] batch %d: error=%v", result.batchNum, result.err)
+				logger.Debugf("[Aggregator] batch %d: error=%v consumed=%d affected=%d", result.batchNum, result.err, result.rowCount, result.affectedRows)
 				if !fastFail {
 					allErrors = append(allErrors, result.err)
 				}
-			} else {
-				processedRows += int64(result.rowCount)
-				totalRows += result.affectedRows
 			}
 			if ti.progressCallback != nil {
 				ti.progressCallback(ti.tableName, csvTotalRows, processedRows, totalRows)
@@ -786,10 +890,9 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	// 启动 CSV 读取 goroutine
 	wg.Add(1)
 	go func(firstData []string) {
-		var lineNum int
+		var recordNum int
 		var batchNum int
 		var totalRead int
-		var batchStart time.Time
 
 		defer wg.Done()
 		defer func() {
@@ -797,71 +900,77 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			logger.Debugf("[CSV Reader] batchChan closed after %d batches, totalRead=%d", batchNum, totalRead)
 		}()
 
-		for {
-			batchStart = time.Now()
-			var batch [][]string
+		send := func(bd batchData) bool {
+			return sendPipelineBatch(safeCtx, batchChan, csvDone, bd)
+		}
 
-			// 检查取消信号
-			select {
-			case <-safeCtx.Done():
-				// 非阻塞发送取消错误到 batchChan，让 DB writer 感知
-				select {
-				case batchChan <- batchData{batchNum: batchNum, err: safeCtx.Err()}:
-				default:
-				}
+		nextRow := func() ([]string, error) {
+			if firstData != nil {
+				row := firstData
+				firstData = nil
+				return row, nil
+			}
+			return reader.Read()
+		}
+
+		for {
+			if safeCtx.Err() != nil {
 				return
-			default:
 			}
 
-			if firstData != nil {
-				// 无表头模式：先处理 firstData，再继续读取
-				batch = append(batch, firstData)
-				firstData = nil // 置空，后续从 reader 读取
-				lineNum++
-			} else {
-				// 读取一批数据
-				for i := 0; i < ti.cfg.Migration.BatchSize; i++ {
-					row, err := reader.Read()
-					if err == io.EOF {
-						break
+			batchStart := time.Now()
+			var processedBatch [][]any
+			for len(processedBatch) < ti.cfg.Migration.BatchSize {
+				row, err := nextRow()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					logger.Errorf("CSV read error in %s at record %d: %v", ti.tableName, recordNum, err)
+					send(batchData{batchNum: batchNum, err: err})
+					return
+				}
+				recordNum++
+				repairedRow, repairErr := repairDelimitedRow(row, rowColumnInfos)
+				if repairErr != nil {
+					csvErr := &CSVStructureError{
+						TableName:    ti.tableName,
+						CSVPath:      ti.csvPath,
+						RecordNumber: int64(recordNum),
+						Expected:     len(rowColumnInfos),
+						Actual:       len(row),
+						Reason:       repairErr.Error(),
 					}
-					if err != nil {
-						logger.Errorf("CSV read error in %s at line %d: %v", ti.tableName, lineNum, err)
-						// 非阻塞发送错误到 batchChan，让 DB writer 感知
-						select {
-						case batchChan <- batchData{batchNum: batchNum, err: err}:
-						default:
-						}
+					if ti.errorRecorder != nil {
+						ti.errorRecorder.RecordError(ti.tableName, "", nil, csvErr)
+					}
+					logger.Errorf("%s", csvErr.Error())
+					batchNum++
+					if !send(batchData{batchNum: batchNum, err: csvErr}) {
 						return
 					}
-					batch = append(batch, row)
-					lineNum++
+					if fastFail {
+						return
+					}
+					continue
+				}
+				processedBatch = append(processedBatch, filterRowData(PreprocessRow(repairedRow), mapping))
+				totalRead++
+				if ti.cfg.Migration.MaxRowsPerTable > 0 && totalRead >= ti.cfg.Migration.MaxRowsPerTable {
+					break
 				}
 			}
 
-			if len(batch) == 0 {
+			if len(processedBatch) == 0 {
 				return
-			}
-
-			// 预处理数据（转换类型，并过滤掉无效列）
-			processedBatch := make([][]any, len(batch))
-			for i, row := range batch {
-				// 先类型转换，再过滤
-				repairedRow := repairDelimitedRow(row, rowColumnInfos)
-				processedRow := PreprocessRow(repairedRow)
-				filteredRow := filterRowData(processedRow, mapping)
-				processedBatch[i] = filteredRow
 			}
 
 			batchNum++
-			totalRead += len(batch)
-			select {
-			case batchChan <- batchData{rows: processedBatch, batchNum: batchNum, err: nil}:
-			case <-csvDone:
+			if !send(batchData{rows: processedBatch, batchNum: batchNum}) {
 				return
 			}
 			logger.Debugf("[CSV Reader] Batch %d: %d rows read, took %.1fs, totalRead=%d",
-				batchNum, len(batch), time.Since(batchStart).Seconds(), totalRead)
+				batchNum, len(processedBatch), time.Since(batchStart).Seconds(), totalRead)
 			if ti.cfg.Migration.MaxRowsPerTable > 0 && totalRead >= ti.cfg.Migration.MaxRowsPerTable {
 				logger.Infof("Reached max_rows_per_table limit (%d rows) for %s, stopping import",
 					ti.cfg.Migration.MaxRowsPerTable, ti.tableName)
@@ -904,7 +1013,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 			// 发送结果到 resultChan
 			resultChan <- batchResult{
 				batchNum:     bd.batchNum,
-				rowCount:     len(bd.rows),
+				rowCount:     result.consumedRows,
 				affectedRows: affected,
 				err:          insertErr,
 			}
@@ -965,6 +1074,7 @@ type ImportResult struct {
 	TotalRows     int64 // CSV 文件总行数
 	ErrorCount    int64
 	Success       bool
+	Skipped       bool
 	ErrorMessage  string
 }
 

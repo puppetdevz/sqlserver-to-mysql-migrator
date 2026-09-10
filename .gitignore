@@ -20,7 +20,6 @@
 # Build artifacts
 /dist/
 /migrate
-migrate
 
 # Migration state (runtime generated)
 state.db

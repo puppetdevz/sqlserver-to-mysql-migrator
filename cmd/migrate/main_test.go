@@ -406,20 +406,19 @@ func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *te
 	}
 }
 
-func TestBuildDDLLookupKeepsLexicographicallyFirstConflict(t *testing.T) {
+func TestBuildDDLLookupReportsCaseInsensitiveConflict(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(false)
 	allDDLs := map[string]*parser.TableDDL{
 		"A": {TableName: "A"},
 		"a": {TableName: "a"},
 	}
 
-	for i := 0; i < 100; i++ {
-		lookup := buildDDLLookup(allDDLs, tableMatcher)
-
-		got := lookup[tableMatcher.Key("a")]
-		if got == nil || got.TableName != "A" {
-			t.Fatalf("buildDDLLookup() kept %v, want A", got)
-		}
+	lookup, err := buildDDLLookup(allDDLs, tableMatcher)
+	if err == nil {
+		t.Fatalf("buildDDLLookup() lookup = %v, want conflict error", lookup)
+	}
+	if !strings.Contains(err.Error(), "A") || !strings.Contains(err.Error(), "a") {
+		t.Fatalf("conflict error = %v, want both original names", err)
 	}
 }
 
@@ -656,7 +655,16 @@ func TestCreateAndTrackTablesReturnsFailedTablesAndError(t *testing.T) {
 	// 编译时验证：createAndTrackTables 现在返回 ([]string, error)
 	var _ = func(cfg *config.Config, conn *database.Connection, missing []string,
 		ddl map[string]*parser.TableDDL, tracker *progress.Tracker,
-		mCtx *migration.MigrationContext, m matcher.TableNameMatcher) ([]string, error) {
-		return createAndTrackTables(cfg, conn, missing, ddl, tracker, mCtx, m)
+		mCtx *migration.MigrationContext, m matcher.TableNameMatcher, createOnly bool) ([]string, error) {
+		return createAndTrackTables(cfg, conn, missing, ddl, tracker, mCtx, m, createOnly)
+	}
+}
+
+func TestCLIExitCodeMatchesMigrationError(t *testing.T) {
+	if got := cliExitCode(nil); got != 0 {
+		t.Fatalf("cliExitCode(nil) = %d, want 0", got)
+	}
+	if got := cliExitCode(errors.New("create failed")); got != 1 {
+		t.Fatalf("cliExitCode(err) = %d, want 1", got)
 	}
 }

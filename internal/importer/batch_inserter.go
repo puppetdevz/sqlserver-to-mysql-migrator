@@ -13,6 +13,10 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
+// ErrUnknownCommit is returned when a statement may already have been committed
+// but the client cannot prove the outcome. Callers must not replay that range.
+var ErrUnknownCommit = errors.New("commit result unknown; verify table contents before re-importing")
+
 // maxPreparedPlaceholders MySQL prepared statement 占位符上限（留有余量）
 const maxPreparedPlaceholders = 65535
 
@@ -172,7 +176,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 		stmt, err := bi.db.PrepareContext(bi.ctx, query)
 		if err != nil {
 			bi.resetOnConnErr(err)
-			return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
+			return nil, false, &insertStageError{Stage: insertStagePrepare, Err: fmt.Errorf("failed to prepare statement: %w", err)}
 		}
 
 		bi.stmtMu.Lock()
@@ -186,7 +190,7 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 	stmt, err := bi.db.PrepareContext(bi.ctx, query)
 	if err != nil {
 		bi.resetOnConnErr(err)
-		return nil, false, fmt.Errorf("failed to prepare statement: %w", err)
+		return nil, false, &insertStageError{Stage: insertStagePrepare, Err: fmt.Errorf("failed to prepare statement: %w", err)}
 	}
 	bi.stmtMu.Lock()
 	bi.cachedRows = 0
@@ -214,6 +218,89 @@ func estimateBatchBytes(rows [][]interface{}) int64 {
 	return total
 }
 
+type insertRange struct {
+	Start int
+	End   int
+}
+
+type insertStage string
+
+const (
+	insertStagePrepare insertStage = "prepare"
+	insertStageExec    insertStage = "exec"
+	insertStageResult  insertStage = "result"
+)
+
+type insertStageError struct {
+	Stage insertStage
+	Err   error
+}
+
+func (e *insertStageError) Error() string {
+	if e == nil || e.Err == nil {
+		return "insert error"
+	}
+	if e.UnknownCommit() {
+		return fmt.Sprintf("failed to execute batch insert: %v: %v", ErrUnknownCommit, e.Err)
+	}
+	return e.Err.Error()
+}
+
+func (e *insertStageError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *insertStageError) Is(target error) bool {
+	return e != nil && target == ErrUnknownCommit && e.UnknownCommit()
+}
+
+func (e *insertStageError) UnknownCommit() bool {
+	return e != nil && e.Stage == insertStageExec && isBareConnectionError(e.Err)
+}
+
+func maxRowsPerBatchForColumns(nCols int) int {
+	if nCols <= 0 {
+		return 1
+	}
+	n := (maxPreparedPlaceholders * 95) / (100 * nCols)
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+func planInsertRanges(rows [][]interface{}, maxRowsPerBatch int, maxBatchBytes int64) []insertRange {
+	if len(rows) == 0 {
+		return nil
+	}
+	if maxRowsPerBatch < 1 {
+		maxRowsPerBatch = 1
+	}
+	ranges := make([]insertRange, 0, (len(rows)+maxRowsPerBatch-1)/maxRowsPerBatch)
+	for i := 0; i < len(rows); {
+		end := i + maxRowsPerBatch
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if maxBatchBytes > 0 {
+			for end > i+1 && estimateBatchBytes(rows[i:end]) > maxBatchBytes {
+				end = (i + end) / 2
+			}
+		}
+		ranges = append(ranges, insertRange{Start: i, End: end})
+		i = end
+	}
+	return ranges
+}
+
+// PlanInsertRanges returns deterministic contiguous sub-batch ranges for rows.
+func (bi *BatchInserter) PlanInsertRanges(rows [][]interface{}) []insertRange {
+	return planInsertRanges(rows, maxRowsPerBatchForColumns(len(bi.columns)), bi.maxBatchBytes)
+}
+
 // InsertBatch 批量插入数据（按占位符和字节数自动拆分）
 func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	if len(rows) == 0 {
@@ -224,13 +311,8 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 		return 0, fmt.Errorf("no columns defined for table %s", bi.tableName)
 	}
 
-	// 根据列数计算每批最大行数，避免超出 MySQL prepared statement 占位符限制
-	maxRowsPerBatch := (maxPreparedPlaceholders * 95) / (100 * len(bi.columns))
-	if maxRowsPerBatch < 1 {
-		maxRowsPerBatch = 1
-	}
-
-	if len(rows) <= maxRowsPerBatch && (bi.maxBatchBytes <= 0 || estimateBatchBytes(rows) <= bi.maxBatchBytes) {
+	ranges := bi.PlanInsertRanges(rows)
+	if len(ranges) == 1 {
 		bi.stmtMu.RLock()
 		cachedCapacity := bi.cachedRows
 		bi.stmtMu.RUnlock()
@@ -244,23 +326,12 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 
 	// 拆分为多个小批次（按占位符和字节数双重限制，不缓存）
 	var totalAffected int64
-	for i := 0; i < len(rows); {
-		end := i + maxRowsPerBatch
-		if end > len(rows) {
-			end = len(rows)
-		}
-		// 字节数限制：二分法找最大不超限的子批次
-		if bi.maxBatchBytes > 0 {
-			for end > i+1 && estimateBatchBytes(rows[i:end]) > bi.maxBatchBytes {
-				end = (i + end) / 2
-			}
-		}
-		affected, err := bi.insertBatchSingleWithAutoWiden(rows[i:end], false)
+	for _, r := range ranges {
+		affected, err := bi.insertBatchSingleWithAutoWiden(rows[r.Start:r.End], false)
 		if err != nil {
 			return totalAffected, err
 		}
 		totalAffected += affected
-		i = end
 	}
 	return totalAffected, nil
 }
@@ -382,12 +453,12 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 	result, err := stmt.ExecContext(bi.ctx, args...)
 	if err != nil {
 		bi.resetOnConnErr(err)
-		return 0, fmt.Errorf("failed to execute batch insert: %w", err)
+		return 0, &insertStageError{Stage: insertStageExec, Err: fmt.Errorf("failed to execute batch insert: %w", err)}
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get rows affected: %w", err)
+		return 0, &insertStageError{Stage: insertStageResult, Err: fmt.Errorf("failed to get rows affected: %w", err)}
 	}
 
 	if canCache {
@@ -398,9 +469,32 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 	return rowsAffected, nil
 }
 
-func isRetryableConnectionError(err error) bool {
+func isBareConnectionError(err error) bool {
 	return err != nil && !errors.Is(err, context.Canceled) &&
 		(errors.Is(err, mysql.ErrInvalidConn) || errors.Is(err, driver.ErrBadConn))
+}
+
+func isRetryableConnectionError(err error) bool {
+	return isBareConnectionError(err)
+}
+
+func isUnknownCommitError(err error) bool {
+	if isRetryablePrepareConnectionError(err) {
+		return false
+	}
+	if errors.Is(err, ErrUnknownCommit) {
+		return true
+	}
+	// Connection errors without a proven pre-exec stage cannot be retried safely.
+	return isBareConnectionError(err)
+}
+
+func isRetryablePrepareConnectionError(err error) bool {
+	var staged *insertStageError
+	if errors.As(err, &staged) {
+		return staged.Stage == insertStagePrepare && isBareConnectionError(staged.Err)
+	}
+	return false
 }
 
 func isDatabaseCapacityError(err error) bool {

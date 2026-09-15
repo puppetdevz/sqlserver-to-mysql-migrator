@@ -104,6 +104,9 @@ func newBool(v bool) *bool {
 
 // validate 验证配置有效性
 func validate(cfg *Config) error {
+	if err := cfg.Migration.Resources.Validate(); err != nil {
+		return fmt.Errorf("migration.resources: %w", err)
+	}
 	// 验证源配置
 	if cfg.Source.DDLFile == "" {
 		return fmt.Errorf("source.ddl_file is required")

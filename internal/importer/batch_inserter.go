@@ -6,9 +6,13 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/diagnostics"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 )
@@ -53,20 +57,25 @@ var (
 
 // BatchInserter 批量插入器
 type BatchInserter struct {
-	db            *sql.DB
-	tableName     string
-	quotedTable   string   // 预计算的引用表名
-	columns       []string // 只包含数据库中存在的列
-	quotedColumns []string // 预计算的引用列名
-	batchSize     int
-	onDuplicate   string // "replace" or "ignore"
-	stmt          *sql.Stmt
-	cachedRows    int // 缓存语句的行数（用于判断后续批次是否能复用）
-	stmtMu        sync.RWMutex
-	buildQueryMu  sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
-	skippedCols   []string   // 跳过的列
-	maxBatchBytes int64      // 单批次最大字节数，默认 32MB
-	ctx           context.Context
+	stats          *diagnostics.Stats
+	db             *sql.DB
+	tableName      string
+	quotedTable    string   // 预计算的引用表名
+	columns        []string // 只包含数据库中存在的列
+	quotedColumns  []string // 预计算的引用列名
+	batchSize      int
+	onDuplicate    string // "replace" or "ignore"
+	stmt           *sql.Stmt
+	cachedRows     int // cached statement row count
+	cachedQuery    string
+	cachedDB       *sql.DB
+	rowMemoryLimit int64 // bounded single-row exception to the legacy SQL split estimate
+	sqlCacheBytes  int64 // zero selects the 1 MiB default; one statement, no unbounded template/args pool
+	stmtMu         sync.RWMutex
+	buildQueryMu   sync.Mutex // 保护 buildInsertQuery 多次调用时的竞态
+	skippedCols    []string   // 跳过的列
+	maxBatchBytes  int64      // 单批次最大字节数，默认 32MB
+	ctx            context.Context
 }
 
 // NewBatchInserter 创建批量插入器
@@ -157,13 +166,13 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 		bi.stmtMu.Lock()
 
 		if bi.stmt != nil {
-			// 通过占位符数量判断 query 是否相同
-			cachedPlaceholders := bi.cachedRows * len(bi.columns)
-			newPlaceholders := strings.Count(query, "?")
-			if cachedPlaceholders == newPlaceholders {
+			// Exact identity includes table/columns/mode/rows and database handle.
+			// Counting '?' is incorrect when quoted identifiers themselves contain '?'.
+			if bi.cachedRows > 0 && bi.cachedQuery == query && bi.cachedDB == bi.db {
 				// query 相同，可以复用
 				stmt := bi.stmt
 				bi.stmtMu.Unlock()
+				bi.stats.Add(func(c *diagnostics.Counters) { c.CacheHits++ })
 				return stmt, false, nil
 			}
 			// query 不同，关闭旧 statement，使用新 query
@@ -173,7 +182,10 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 
 		// 释放锁后再 Prepare，避免长时间持有写锁阻塞其他 goroutine
 		bi.stmtMu.Unlock()
+		prepareDone := bi.stats.Start(diagnostics.Prepare)
 		stmt, err := bi.db.PrepareContext(bi.ctx, query)
+		prepareDone()
+		bi.stats.Add(func(c *diagnostics.Counters) { c.Prepares++ })
 		if err != nil {
 			bi.resetOnConnErr(err)
 			return nil, false, &insertStageError{Stage: insertStagePrepare, Err: fmt.Errorf("failed to prepare statement: %w", err)}
@@ -181,13 +193,18 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 
 		bi.stmtMu.Lock()
 		bi.stmt = stmt
+		bi.cachedQuery = query
+		bi.cachedDB = bi.db
 		bi.cachedRows = 0
 		bi.stmtMu.Unlock()
 		return stmt, false, nil
 	}
 
 	// 不使用缓存，每次重新 Prepare
+	prepareDone := bi.stats.Start(diagnostics.Prepare)
 	stmt, err := bi.db.PrepareContext(bi.ctx, query)
+	prepareDone()
+	bi.stats.Add(func(c *diagnostics.Counters) { c.Prepares++ })
 	if err != nil {
 		bi.resetOnConnErr(err)
 		return nil, false, &insertStageError{Stage: insertStagePrepare, Err: fmt.Errorf("failed to prepare statement: %w", err)}
@@ -203,16 +220,18 @@ func estimateBatchBytes(rows [][]interface{}) int64 {
 	var total int64
 	for _, row := range rows {
 		for _, v := range row {
+			var size int64
 			switch val := v.(type) {
 			case string:
-				total += int64(len(val))
+				size = int64(len(val))
 			case []byte:
-				total += int64(len(val))
+				size = int64(len(val))
 			case nil:
-				total += 4 // NULL 占位
+				size = 4
 			default:
-				total += 16 // 数值类型默认估算
+				size = 16
 			}
+			total = saturatingAdd(total, size)
 		}
 	}
 	return total
@@ -265,7 +284,7 @@ func maxRowsPerBatchForColumns(nCols int) int {
 	if nCols <= 0 {
 		return 1
 	}
-	n := (maxPreparedPlaceholders * 95) / (100 * nCols)
+	n := ((maxPreparedPlaceholders * 95) / 100) / nCols
 	if n < 1 {
 		return 1
 	}
@@ -273,21 +292,50 @@ func maxRowsPerBatchForColumns(nCols int) int {
 }
 
 func planInsertRanges(rows [][]interface{}, maxRowsPerBatch int, maxBatchBytes int64) []insertRange {
+	if BaselineAlgorithms {
+		return baselinePlanRanges(rows, maxRowsPerBatch, maxBatchBytes)
+	}
 	if len(rows) == 0 {
 		return nil
 	}
 	if maxRowsPerBatch < 1 {
 		maxRowsPerBatch = 1
 	}
-	ranges := make([]insertRange, 0, (len(rows)+maxRowsPerBatch-1)/maxRowsPerBatch)
-	for i := 0; i < len(rows); {
-		end := i + maxRowsPerBatch
-		if end > len(rows) {
-			end = len(rows)
+	// Common case: total payload fits the split estimate, so every nonnegative
+	// subrange fits too. Avoid allocating a prefix array for ordinary batches.
+	if maxBatchBytes > 0 && estimateBatchBytes(rows) <= maxBatchBytes {
+		maxBatchBytes = 0
+	}
+	ranges := make([]insertRange, 0, (len(rows)-1)/maxRowsPerBatch+1)
+	// Preserve the exact old dyadic range choices, replacing repeated scans with
+	// prefix sums. Fall back to saturating scans if a prefix is not representable.
+	var prefix []int64
+	overflow := false
+	if maxBatchBytes > 0 {
+		prefix = make([]int64, len(rows)+1)
+		for i := range rows {
+			size := estimateBatchBytes(rows[i : i+1])
+			if size > math.MaxInt64-prefix[i] {
+				overflow = true
+				break
+			}
+			prefix[i+1] = prefix[i] + size
 		}
+	}
+	for i := 0; i < len(rows); {
+		end := i + min(maxRowsPerBatch, len(rows)-i)
 		if maxBatchBytes > 0 {
-			for end > i+1 && estimateBatchBytes(rows[i:end]) > maxBatchBytes {
-				end = (i + end) / 2
+			for end > i+1 {
+				var size int64
+				if overflow {
+					size = estimateBatchBytes(rows[i:end])
+				} else {
+					size = prefix[end] - prefix[i]
+				}
+				if size <= maxBatchBytes {
+					break
+				}
+				end = i + (end-i)/2
 			}
 		}
 		ranges = append(ranges, insertRange{Start: i, End: end})
@@ -298,6 +346,7 @@ func planInsertRanges(rows [][]interface{}, maxRowsPerBatch int, maxBatchBytes i
 
 // PlanInsertRanges returns deterministic contiguous sub-batch ranges for rows.
 func (bi *BatchInserter) PlanInsertRanges(rows [][]interface{}) []insertRange {
+	defer bi.stats.Start(diagnostics.Plan)()
 	return planInsertRanges(rows, maxRowsPerBatchForColumns(len(bi.columns)), bi.maxBatchBytes)
 }
 
@@ -310,6 +359,20 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 	if len(bi.columns) == 0 {
 		return 0, fmt.Errorf("no columns defined for table %s", bi.tableName)
 	}
+	if len(bi.columns) > maxPreparedPlaceholders {
+		return 0, fmt.Errorf("%w: single row exceeds placeholder limit", migration.ErrResourceLimit)
+	}
+	for _, row := range rows {
+		if len(row) != len(bi.columns) {
+			return 0, fmt.Errorf("row/column shape mismatch")
+		}
+		// The import pipeline supplies an independent memory bound. Preserve the
+		// low-level API's explicit negative SQL-byte-limit behavior when not supplied.
+		limit := bi.rowMemoryLimit
+		if limit > 0 && estimateInterfaceRecordMemory(row) > limit {
+			return 0, fmt.Errorf("%w: single row exceeds bounded memory exception", migration.ErrResourceLimit)
+		}
+	}
 
 	ranges := bi.PlanInsertRanges(rows)
 	if len(ranges) == 1 {
@@ -319,12 +382,15 @@ func (bi *BatchInserter) InsertBatch(rows [][]interface{}) (int64, error) {
 
 		if cachedCapacity > 0 && len(rows) < cachedCapacity {
 			bi.resetStmt()
+			bi.stats.Add(func(c *diagnostics.Counters) { c.BatchesUncached++ })
 			return bi.insertBatchSingleWithAutoWiden(rows, false)
 		}
+		bi.stats.Add(func(c *diagnostics.Counters) { c.BatchesCached++ })
 		return bi.insertBatchSingleWithAutoWiden(rows, true) // 单批次，可缓存
 	}
 
 	// 拆分为多个小批次（按占位符和字节数双重限制，不缓存）
+	bi.stats.Add(func(c *diagnostics.Counters) { c.BatchesSplit++ })
 	var totalAffected int64
 	for _, r := range ranges {
 		affected, err := bi.insertBatchSingleWithAutoWiden(rows[r.Start:r.End], false)
@@ -431,12 +497,30 @@ func (bi *BatchInserter) resetStmt() {
 		bi.stmt = nil
 	}
 	bi.cachedRows = 0
+	bi.cachedQuery = ""
+	bi.cachedDB = nil
 }
 
 // insertBatchSingle 执行单次插入
 // canCache: 是否允许缓存预编译语句（拆分批次不允许，避免占位符数量不一致）
 func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) (int64, error) {
+	sqlDone := bi.stats.Start(diagnostics.SQL)
+	if len(bi.columns) == 0 || len(rows) > maxPreparedPlaceholders/len(bi.columns) {
+		sqlDone()
+		return 0, fmt.Errorf("%w: placeholder limit", migration.ErrResourceLimit)
+	}
+	limit := bi.sqlCacheBytes
+	if limit == 0 {
+		limit = 1 << 20
+	}
+	// Check length before constructing the query, including arbitrarily long identifiers.
+	if bi.querySize(len(rows)) > limit {
+		sqlDone()
+		return 0, fmt.Errorf("%w: SQL template byte limit", migration.ErrResourceLimit)
+	}
 	query := bi.buildInsertQuery(len(rows))
+	sqlDone()
+	bi.stats.Add(func(c *diagnostics.Counters) { c.SubBatches++ })
 	stmt, needsClose, err := bi.getStmt(query, canCache)
 	if err != nil {
 		return 0, err
@@ -445,18 +529,42 @@ func (bi *BatchInserter) insertBatchSingle(rows [][]interface{}, canCache bool) 
 		defer stmt.Close()
 	}
 
+	// No retained args cache: bound allocation by the validated placeholder count.
 	var args []interface{}
+	if !BaselineAlgorithms {
+		args = make([]interface{}, 0, len(rows)*len(bi.columns))
+	}
 	for _, row := range rows {
 		args = append(args, row...)
 	}
 
+	if bi.stats != nil {
+		batchBytes := estimateBatchBytes(rows)
+		bi.stats.Add(func(c *diagnostics.Counters) {
+			n := int64(len(rows))
+			c.ActualBatchRows += n
+			c.ActualBatchBytes += batchBytes
+			if c.MinBatchRows == 0 || n < c.MinBatchRows {
+				c.MinBatchRows = n
+			}
+			c.MaxBatchRows = max(c.MaxBatchRows, n)
+			if c.MinBatchBytes == 0 || batchBytes < c.MinBatchBytes {
+				c.MinBatchBytes = batchBytes
+			}
+			c.MaxBatchBytes = max(c.MaxBatchBytes, batchBytes)
+		})
+	}
+	execStart := time.Now()
 	result, err := stmt.ExecContext(bi.ctx, args...)
+	bi.stats.Observe(diagnostics.Exec, time.Since(execStart))
 	if err != nil {
 		bi.resetOnConnErr(err)
 		return 0, &insertStageError{Stage: insertStageExec, Err: fmt.Errorf("failed to execute batch insert: %w", err)}
 	}
 
+	resultDone := bi.stats.Start(diagnostics.ResultRead)
 	rowsAffected, err := result.RowsAffected()
+	resultDone()
 	if err != nil {
 		return 0, &insertStageError{Stage: insertStageResult, Err: fmt.Errorf("failed to get rows affected: %w", err)}
 	}
@@ -545,10 +653,16 @@ func (bi *BatchInserter) resetOnConnErr(err error) {
 
 // buildInsertQuery 构建批量插入 SQL 语句（线程安全）
 func (bi *BatchInserter) buildInsertQuery(numRows int) string {
+	if BaselineAlgorithms {
+		return baselineBuildQuery(bi, numRows)
+	}
 	bi.buildQueryMu.Lock()
 	defer bi.buildQueryMu.Unlock()
 
 	var query strings.Builder
+	if size := bi.querySize(numRows); size > 0 && size <= 64<<20 {
+		query.Grow(int(size))
+	}
 
 	// 选择插入类型
 	if bi.onDuplicate == "replace" {
@@ -557,31 +671,72 @@ func (bi *BatchInserter) buildInsertQuery(numRows int) string {
 		query.WriteString("INSERT IGNORE INTO ")
 	}
 
-	// 表名
-	query.WriteString(bi.quotedTable + " ")
-
-	// 列名
-	query.WriteString(fmt.Sprintf("(%s) VALUES ", strings.Join(bi.quotedColumns, ", ")))
-
-	// 值占位符
-	valuePlaceholders := make([]string, numRows)
-	placeholderCount := len(bi.columns)
-	for i := 0; i < numRows; i++ {
-		placeholders := make([]string, placeholderCount)
-		for j := 0; j < placeholderCount; j++ {
-			placeholders[j] = "?"
+	query.WriteString(bi.quotedTable)
+	query.WriteString(" (")
+	for i, col := range bi.quotedColumns {
+		if i > 0 {
+			query.WriteString(", ")
 		}
-		valuePlaceholders[i] = fmt.Sprintf("(%s)", strings.Join(placeholders, ", "))
+		query.WriteString(col)
 	}
-	query.WriteString(strings.Join(valuePlaceholders, ", "))
+	query.WriteString(") VALUES ")
+	row := "()"
+	if n := len(bi.columns); n > 0 {
+		row = "(" + strings.Repeat("?, ", n-1) + "?)"
+	}
+	for i := 0; i < numRows; i++ {
+		if i > 0 {
+			query.WriteString(", ")
+		}
+		query.WriteString(row)
+	}
 
 	return query.String()
+}
+
+func saturatingAdd(a, b int64) int64 {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
+}
+func saturatingMultiply(a, b int64) int64 {
+	if a > 0 && b > math.MaxInt64/a {
+		return math.MaxInt64
+	}
+	return a * b
+}
+func (bi *BatchInserter) querySize(rows int) int64 {
+	size := int64(len("INSERT IGNORE INTO "))
+	if bi.onDuplicate == "replace" {
+		size = int64(len("REPLACE INTO "))
+	}
+	size = saturatingAdd(size, int64(len(bi.quotedTable)))
+	size = saturatingAdd(size, 11) // table space + parentheses/VALUES
+	for i, col := range bi.quotedColumns {
+		size = saturatingAdd(size, int64(len(col)))
+		if i > 0 {
+			size = saturatingAdd(size, 2)
+		}
+	}
+	if rows > 0 {
+		rowSize := saturatingMultiply(int64(len(bi.columns)), 3)
+		if len(bi.columns) == 0 {
+			rowSize = 2
+		}
+		size = saturatingAdd(size, saturatingMultiply(int64(rows), rowSize))
+		size = saturatingAdd(size, saturatingMultiply(int64(rows-1), 2))
+	}
+	return size
 }
 
 // Close 关闭预编译语句
 func (bi *BatchInserter) Close() error {
 	bi.stmtMu.Lock()
 	defer bi.stmtMu.Unlock()
+	bi.cachedRows = 0
+	bi.cachedQuery = ""
+	bi.cachedDB = nil
 	if bi.stmt != nil {
 		err := bi.stmt.Close()
 		bi.stmt = nil

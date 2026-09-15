@@ -18,8 +18,10 @@ import (
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/diagnostics"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -86,11 +88,20 @@ func (ti *TableImporter) WithContext(ctx context.Context) *TableImporter {
 }
 
 // Import 导入表数据（流水线优化：边读边写）
-func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
+func (ti *TableImporter) Import() (out *ImportResult, outErr error, outDiag *ImportDiagnostic) {
+	stats := ti.cfg.Diagnostics.TableStats(ti.tableName)
+	ti.cfg.Diagnostics.State(ti.tableName, "active", "not_run", 0)
+	defer func() {
+		if outErr != nil {
+			recordDiagnosticFailure(ti.cfg.Diagnostics, ti.tableName, outErr)
+		}
+	}()
 	logger.Infof("Starting import for table: %s", ti.tableName)
 
 	// 检查表是否存在
+	metadataDone := stats.Start(diagnostics.Metadata)
 	exists, err := ti.conn.TableExists(ti.tableName)
+	metadataDone()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check table existence: %w", err), nil
 	}
@@ -110,7 +121,14 @@ func (ti *TableImporter) Import() (*ImportResult, error, *ImportDiagnostic) {
 	actualTableName := ti.conn.GetActualTableName(ti.tableName)
 
 	// 统计 CSV 总行数（用于进度显示）
+	prescanDone := stats.Start(diagnostics.Prescan)
 	csvTotalRows, err := ti.countRowsForProgress(file)
+	prescanDone()
+	if ti.cfg.Migration.ShouldCountCSVRowsBeforeImport() && err == nil {
+		if info, statErr := file.Stat(); statErr == nil {
+			stats.Add(func(c *diagnostics.Counters) { c.PrescanBytes += info.Size() })
+		}
+	}
 	if err != nil {
 		logger.Warnf("Failed to count CSV rows for %s: %v", ti.tableName, err)
 	}
@@ -447,9 +465,11 @@ func filterRowData(row []any, mapping []int) []any {
 
 // batchData is a pipeline unit from the CSV reader to the DB writer.
 type batchData struct {
-	rows     [][]any
-	batchNum int
-	err      error
+	lease      *migration.Lease
+	queueLease *migration.Lease
+	rows       [][]any
+	batchNum   int
+	err        error
 }
 
 // batchResult 批次处理结果（从 DB writer → 主 goroutine）
@@ -674,6 +694,20 @@ func (ti *TableImporter) emitPressureEventsForBatch(batchNum int, result adaptiv
 
 // pipelinedImport 流水线导入：边读边写
 func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, csvTotalRows int64) (*ImportResult, error, *ImportDiagnostic) {
+	stats := ti.cfg.Diagnostics.TableStats(ti.tableName)
+	limits := ti.cfg.Migration.Resources.Effective()
+	if BaselineAlgorithms {
+		limits.QueueBatches = bufferSize
+	}
+	budget, budgetErr := ti.cfg.ImportBudget()
+	if budgetErr != nil {
+		return nil, budgetErr, nil
+	}
+	queueBudget, budgetErr := migration.NewBudget(limits.QueueBytes, limits.QueueBatches, nil)
+	if budgetErr != nil {
+		return nil, budgetErr, nil
+	}
+	defer stats.Start(diagnostics.Pipeline)()
 	safeCtx := ti.ctx
 	if safeCtx == nil {
 		safeCtx = context.Background()
@@ -685,7 +719,9 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	reader.FieldsPerRecord = -1
 
 	// 获取数据库列（提前获取，用于无表头模式校验）
+	metadataDone := stats.Start(diagnostics.Metadata)
 	dbColumnInfos, dbErr := ti.getDBColumnInfos(safeCtx, actualTableName)
+	metadataDone()
 	var dbColumns []string
 	if dbErr != nil {
 		logger.Warnf("Failed to get DB columns for %s: %v", actualTableName, dbErr)
@@ -768,7 +804,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		firstRow, err = reader.Read()
 		if err == io.EOF {
 			file.Close()
-			return &ImportResult{ProcessedRows: 0, InsertedRows: 0, ErrorCount: 0}, nil, nil
+			return &ImportResult{TableName: ti.tableName, Success: true, ProcessedRows: 0, InsertedRows: 0, ErrorCount: 0}, nil, nil
 		}
 		if err != nil {
 			file.Close()
@@ -825,6 +861,9 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	}
 	inserter.SetMaxBatchBytes(ti.cfg.Migration.MaxBatchBytes)
 	inserter.SetContext(safeCtx)
+	inserter.stats = stats
+	inserter.sqlCacheBytes = limits.SQLCacheBytes
+	inserter.rowMemoryLimit = limits.BatchMemoryBytes / 2
 	defer inserter.Close()
 
 	// 记录跳过的列
@@ -850,8 +889,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	// 建立流水线：CSV读取 -> 预处理 -> 数据库插入
 	var csvDoneOnce sync.Once
 	csvDone := make(chan struct{})
-	batchChan := make(chan batchData, bufferSize)
-	resultChan := make(chan batchResult, bufferSize)
+	batchChan := make(chan batchData, limits.QueueBatches)
+	resultChan := make(chan batchResult, limits.QueueBatches)
+	producerCtx, cancelProducer := context.WithCancel(safeCtx)
+	defer cancelProducer()
 	aggregatorDone := make(chan struct{})
 
 	// fast_fail 配置（闭包捕获，无需锁）
@@ -861,7 +902,6 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	var processedRows int64
 	var errorCount int64
 	var lastErr error
-	var allErrors []error
 	var wg sync.WaitGroup
 
 	// 启动结果聚合 goroutine
@@ -869,15 +909,18 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		defer close(aggregatorDone)
 
 		for result := range resultChan {
+			stats.Add(func(c *diagnostics.Counters) {
+				c.ConsumedRows += int64(result.rowCount)
+				c.AffectedRows += result.affectedRows
+			})
 			processedRows += int64(result.rowCount)
 			totalRows += result.affectedRows
 			if result.err != nil {
 				errorCount++
-				lastErr = result.err
-				logger.Debugf("[Aggregator] batch %d: error=%v consumed=%d affected=%d", result.batchNum, result.err, result.rowCount, result.affectedRows)
-				if !fastFail {
-					allErrors = append(allErrors, result.err)
+				if !errors.Is(lastErr, ErrUnknownCommit) {
+					lastErr = result.err
 				}
+				logger.Debugf("[Aggregator] batch %d: error=%v consumed=%d affected=%d", result.batchNum, result.err, result.rowCount, result.affectedRows)
 			}
 			if ti.progressCallback != nil {
 				ti.progressCallback(ti.tableName, csvTotalRows, processedRows, totalRows)
@@ -893,6 +936,21 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		var recordNum int
 		var batchNum int
 		var totalRead int
+		var currentLease, queueLease *migration.Lease
+		defer func() { currentLease.Release(); queueLease.Release() }()
+		var parsed, repaired, structureErrors, lastOffset int64
+		flushReadStats := func() {
+			offset := reader.InputOffset()
+			stats.Add(func(c *diagnostics.Counters) {
+				c.ParsedRows += parsed
+				c.Repairs += repaired
+				c.StructureErrors += structureErrors
+				c.CSVBytes += offset - lastOffset
+			})
+			parsed, repaired, structureErrors = 0, 0, 0
+			lastOffset = offset
+		}
+		defer flushReadStats()
 
 		defer wg.Done()
 		defer func() {
@@ -901,6 +959,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 		}()
 
 		send := func(bd batchData) bool {
+			defer stats.Start(diagnostics.EnqueueWait)()
 			return sendPipelineBatch(safeCtx, batchChan, csvDone, bd)
 		}
 
@@ -918,7 +977,20 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				return
 			}
 
+			var acquireErr error
+			budgetWaitDone := stats.Start(diagnostics.EnqueueWait)
+			if !BaselineAlgorithms && currentLease == nil {
+				queueLease, acquireErr = queueBudget.Acquire(producerCtx, limits.BatchMemoryBytes)
+				if acquireErr == nil {
+					currentLease, acquireErr = budget.Acquire(producerCtx, limits.BatchMemoryBytes)
+				}
+			}
+			budgetWaitDone()
+			if acquireErr != nil {
+				return
+			}
 			batchStart := time.Now()
+			var batchMemory int64
 			var processedBatch [][]any
 			for len(processedBatch) < ti.cfg.Migration.BatchSize {
 				row, err := nextRow()
@@ -931,8 +1003,21 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 					return
 				}
 				recordNum++
+				parsed++
+				var rowMemory int64
+				if !BaselineAlgorithms {
+					rowMemory = estimateCSVRecordMemory(row)
+				}
+				if !BaselineAlgorithms && rowMemory > limits.BatchMemoryBytes/2 {
+					resourceErr := fmt.Errorf("%w: CSV logical row estimated memory %d exceeds half batch reservation %d", migration.ErrResourceLimit, rowMemory, limits.BatchMemoryBytes/2)
+					send(batchData{batchNum: batchNum + 1, err: resourceErr})
+					return
+				}
+				convertStart := time.Now()
 				repairedRow, repairErr := repairDelimitedRow(row, rowColumnInfos)
 				if repairErr != nil {
+					stats.Observe(diagnostics.ConvertRepair, time.Since(convertStart))
+					structureErrors++
 					csvErr := &CSVStructureError{
 						TableName:    ti.tableName,
 						CSVPath:      ti.csvPath,
@@ -954,21 +1039,30 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 					}
 					continue
 				}
+				if len(repairedRow) != len(row) {
+					repaired++
+				}
+				batchMemory += rowMemory
 				processedBatch = append(processedBatch, filterRowData(PreprocessRow(repairedRow), mapping))
+				stats.Observe(diagnostics.ConvertRepair, time.Since(convertStart))
 				totalRead++
-				if ti.cfg.Migration.MaxRowsPerTable > 0 && totalRead >= ti.cfg.Migration.MaxRowsPerTable {
+				if (!BaselineAlgorithms && batchMemory >= limits.BatchMemoryBytes/2) || (ti.cfg.Migration.MaxRowsPerTable > 0 && totalRead >= ti.cfg.Migration.MaxRowsPerTable) {
 					break
 				}
 			}
 
+			stats.Observe(diagnostics.ReadParse, time.Since(batchStart))
+			flushReadStats()
 			if len(processedBatch) == 0 {
 				return
 			}
 
 			batchNum++
-			if !send(batchData{rows: processedBatch, batchNum: batchNum}) {
+			if !send(batchData{rows: processedBatch, batchNum: batchNum, lease: currentLease, queueLease: queueLease}) {
 				return
 			}
+			currentLease = nil
+			queueLease = nil
 			logger.Debugf("[CSV Reader] Batch %d: %d rows read, took %.1fs, totalRead=%d",
 				batchNum, len(processedBatch), time.Since(batchStart).Seconds(), totalRead)
 			if ti.cfg.Migration.MaxRowsPerTable > 0 && totalRead >= ti.cfg.Migration.MaxRowsPerTable {
@@ -983,16 +1077,30 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	wg.Add(1)
 	go func() {
 		var totalInserted int64
+		stopWriting := false
 		defer wg.Done()
 		defer func() {
 			close(resultChan)
 			logger.Debugf("[DB Writer] resultChan closed, totalInserted=%d", totalInserted)
 		}()
 
-		for bd := range batchChan {
+		for {
+			waitDone := stats.Start(diagnostics.DequeueWait)
+			bd, ok := <-batchChan
+			waitDone()
+			if !ok {
+				break
+			}
+			bd.queueLease.Release()
 			batchStart := time.Now()
 			// CSV 读取错误，跳过插入但传递结果
 			if bd.err != nil {
+				bd.lease.Release()
+				if fastFail {
+					stopWriting = true
+					cancelProducer()
+					csvDoneOnce.Do(func() { close(csvDone) })
+				}
 				resultChan <- batchResult{
 					batchNum:     bd.batchNum,
 					rowCount:     len(bd.rows),
@@ -1002,10 +1110,27 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				continue
 			}
 
-			result := insertBatchWithAdaptiveRetry(safeCtx, inserter, ti.tableName, bd.batchNum, bd.rows, nil)
+			if stopWriting || safeCtx.Err() != nil {
+				bd.lease.Release()
+				continue
+			}
+			wait := func(delay time.Duration) error {
+				defer stats.Start(diagnostics.RetryWait)()
+				return waitForRetry(safeCtx, delay)
+			}
+			result := insertBatchWithAdaptiveRetry(safeCtx, inserter, ti.tableName, bd.batchNum, bd.rows, wait)
+			stats.Add(func(c *diagnostics.Counters) {
+				c.Retries += int64(result.retries)
+				c.BatchRows += int64(len(bd.rows))
+				c.BatchBytes += estimateBatchBytes(bd.rows)
+				if errors.Is(result.err, ErrUnknownCommit) {
+					c.UnknownCommits++
+				}
+			})
 			affected := result.affectedRows
 			insertErr := result.err
 			batchDuration := time.Since(batchStart)
+			stats.Observe(diagnostics.Batch, batchDuration)
 
 			slowThreshold := time.Duration(ti.cfg.Migration.EffectiveSlowBatchSeconds()) * time.Second
 			ti.emitPressureEventsForBatch(bd.batchNum, result, batchDuration, slowThreshold)
@@ -1026,6 +1151,8 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				ti.errorRecorder.RecordBatchError(ti.tableName, bd.batchNum, bd.rows, insertErr)
 				logger.Errorf("Failed to insert batch %d for table %s after %d retries: %v", bd.batchNum, ti.tableName, result.retries, insertErr)
 				if fastFail {
+					stopWriting = true
+					cancelProducer()
 					csvDoneOnce.Do(func() { close(csvDone) })
 				}
 			} else {
@@ -1033,6 +1160,7 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				logger.Debugf("[DB Writer] Batch %d: %d rows inserted, estimated_bytes=%d retries=%d split=%t duration=%.1fs totalInserted=%d",
 					bd.batchNum, affected, estimateBatchBytes(bd.rows), result.retries, result.split, batchDuration.Seconds(), totalInserted)
 			}
+			bd.lease.Release()
 		}
 	}()
 
@@ -1041,7 +1169,11 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	// 等待 aggregator goroutine 完成（resultChan 由 DB writer goroutine 关闭）
 	<-aggregatorDone
 
-	if fastFail && lastErr != nil {
+	if safeCtx.Err() != nil && lastErr == nil {
+		lastErr = safeCtx.Err()
+		errorCount++
+	}
+	if (fastFail || safeCtx.Err() != nil) && lastErr != nil {
 		return &ImportResult{
 			TableName:     ti.tableName,
 			ProcessedRows: processedRows,

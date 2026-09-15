@@ -1,20 +1,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/converter"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/diagnostics"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/importer"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
@@ -23,6 +27,9 @@ import (
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/progress"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/tablescope"
 )
+
+// BuildLabel is set by scripts/build.sh; it distinguishes delivered A/B artifacts.
+var BuildLabel = "development"
 
 var (
 	configPath    = flag.String("config", "config.yaml", "配置文件路径")
@@ -76,12 +83,25 @@ func main() {
 	os.Exit(runCLI())
 }
 
-func runCLI() int {
+func runCLI() (exitCode int) {
+	var migrationErr error
 	flag.Parse()
+	if handled, code := runOfflineReport(); handled {
+		return code
+	}
+	if handled, code := runOfflineTools(); handled {
+		return code
+	}
+	stopProfiles, err := startLocalProfiles()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Profile initialization failed: %v\n", err)
+		return 1
+	}
+	defer stopProfiles()
 
 	// 显示版本信息
 	if *version {
-		fmt.Printf("db-migration version %s\n", Version)
+		fmt.Printf("db-migration version %s (%s)\n", Version, BuildLabel)
 		return 0
 	}
 
@@ -112,6 +132,28 @@ func runCLI() int {
 		fmt.Fprintln(os.Stderr, formatMigrationTotalDuration(migrationStartedAt, time.Now()))
 		return 1
 	}
+	if *csvInventory != "" {
+		if err := writeCSVInventory(cfg, *csvInventory); err != nil {
+			fmt.Fprintf(os.Stderr, "CSV inventory failed: %v\n", err)
+			return 1
+		}
+		fmt.Printf("CSV inventory written to %s\n", *csvInventory)
+		return 0
+	}
+	recorder, err := openDiagnostics(cfg, migrationStartedAt)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Diagnostics initialization failed before database access: %v\n", err)
+		return 1
+	}
+	cfg.Diagnostics = recorder
+	defer func() {
+		if err := recorder.Close(exitCode == 0, errors.Is(migrationErr, context.Canceled)); err != nil {
+			fmt.Fprintln(os.Stderr, "Diagnostics output failed; report is incomplete and not valid performance evidence. No database writes will be replayed.")
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
+	}()
 	cfg.Logging.File = config.ExpandLogFilePattern(cfg.Logging.File, time.Now())
 
 	// 初始化日志
@@ -128,14 +170,16 @@ func runCLI() int {
 		return 1
 	}
 	defer logger.Sync()
-	var migrationErr error
 	defer func() {
 		logMigrationCompletion(migrationStartedAt, time.Now(), migrationErr)
 	}()
 
 	logger.Info("=== Database Migration Tool Started ===")
-	logger.Infof("Version: %s", Version)
+	logger.Infof("Version: %s (%s)", Version, BuildLabel)
 	logger.Infof("Config: %s", cfg.ConfigFilesSummary())
+	if recorder != nil {
+		logger.Infof("Diagnostics directory: %s", recorder.Dir())
+	}
 
 	tableScope, err := tablescope.Resolve(*tables, *reimport, *reimportFile)
 	if err != nil {
@@ -145,11 +189,12 @@ func runCLI() int {
 	}
 
 	config.LogEffective(cfg, config.CLIArgs{
-		Tables:            *tables,
-		CreateOnly:        *createOnly,
-		ReimportTables:    *reimport,
-		ReimportTableFile: *reimportFile,
-		DryRun:            *dryRun,
+		BaselineAlgorithms: importer.BaselineAlgorithms,
+		Tables:             *tables,
+		CreateOnly:         *createOnly,
+		ReimportTables:     *reimport,
+		ReimportTableFile:  *reimportFile,
+		DryRun:             *dryRun,
 	})
 
 	tableMatcher := matcher.NewTableNameMatcher(cfg.Migration.IsTableNameCaseSensitive())
@@ -163,6 +208,8 @@ func runCLI() int {
 		return 1
 	}
 	defer conn.Close()
+	recorder.SetDB(conn.DB)
+	recorder.Global().Observe(diagnostics.Initialization, time.Since(migrationStartedAt))
 
 	// 初始化进度跟踪器
 	tracker, err := progress.NewTracker()
@@ -250,6 +297,17 @@ func logSelectedTableScopeResult(scope tablescope.Scope, result tablescope.Resul
 func runMigration(cfg *config.Config, conn *database.Connection, tracker *progress.Tracker, tableMatcher matcher.TableNameMatcher, opts migrationRunOptions) error {
 	// 创建迁移上下文
 	migrationCtx := migration.NewMigrationContext()
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go func() {
+		select {
+		case <-signalCtx.Done():
+			migrationCtx.Stop(context.Canceled)
+		case <-runDone:
+		}
+	}()
 	defer func() {
 		if err := migrationCtx.Err(); err != nil {
 			logger.Errorf("Migration failed: %v", err)
@@ -259,7 +317,9 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 	// ========== 步骤 1: 表分类 ==========
 	// 解析 DDL 文件
 	ddlParser := parser.NewDDLParser(cfg.Source.DDLFile)
+	ddlDone := cfg.Diagnostics.Global().Start(diagnostics.DDL)
 	allDDLs, err := ddlParser.ParseAll()
+	ddlDone()
 	if err != nil {
 		return fmt.Errorf("failed to parse DDL file: %w", err)
 	}
@@ -293,9 +353,26 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		}
 	}
 
+	// Initialize the bounded scope before create/TRUNCATE, using metadata only.
+	if cfg.Diagnostics != nil {
+		scopeFiles := make(map[string]string, len(allTableNames))
+		csvPaths, scanErr := scanCSVFiles(cfg.Source.CSVDirectory)
+		if scanErr != nil {
+			return scanErr
+		}
+		csvMap := buildCSVTableMap(csvPaths, cfg.Source.CSVTimestamp, tableMatcher)
+		for _, name := range allTableNames {
+			scopeFiles[name] = csvMap[tableMatcher.Key(name)]
+		}
+		if err := cfg.Diagnostics.Scope(allTableNames, scopeFiles, len(allDDLs)-len(allTableNames)); err != nil {
+			return err
+		}
+	}
 	// 分类表（已存在 vs 缺失）
 	inspector := database.NewInspector(conn, tableMatcher)
+	metadataDone := cfg.Diagnostics.Global().Start(diagnostics.Metadata)
 	classification, err := inspector.ClassifyTables(allTableNames)
+	metadataDone()
 	if err != nil {
 		return fmt.Errorf("failed to classify tables: %w", err)
 	}
@@ -310,22 +387,32 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 			logger.Warnf("reimport table scope skipped: table=%s reason=target table does not exist; reimport mode does not create missing tables source=%s",
 				tableName, opts.TableScope.Source)
 		}
+		for _, name := range classification.MissingTables {
+			cfg.Diagnostics.State(name, "skipped", "not_run", 0)
+		}
 		allTableNames = classification.ExistingTables
 		classification.MissingTables = nil
 	}
 
+	if opts.DryRun || opts.CreateOnly {
+		for _, name := range allTableNames {
+			cfg.Diagnostics.State(name, "skipped", "not_run", 0)
+		}
+	}
 	tracker.SetPlannedTotalTables(len(allTableNames))
 	logger.Infof("Overall migration target: %d tables", len(allTableNames))
 
 	// ========== 步骤 2: DDL 转换 + 表创建 ==========
 	var stepErrs []error
 	if opts.DryRun {
-		logger.Infof("[DRY RUN] Would create %d missing tables", len(classification.MissingTables))
-		for _, tableName := range classification.MissingTables {
-			logger.Infof("[DRY RUN]   - %s", tableName)
-		}
+		logWritePreview(cfg, classification.MissingTables, classification.ExistingTables)
 	} else if len(classification.MissingTables) > 0 {
+		createDone := cfg.Diagnostics.Global().Start(diagnostics.Create)
 		createFailed, createErr := createAndTrackTables(cfg, conn, classification.MissingTables, ddlLookup, tracker, migrationCtx, tableMatcher, opts.CreateOnly)
+		createDone()
+		for _, name := range createFailed {
+			cfg.Diagnostics.State(name, "failed", "not_run", 0)
+		}
 		if createErr != nil {
 			logger.Errorf("Some tables failed to create: %v", createErr)
 			stepErrs = append(stepErrs, createErr)
@@ -425,6 +512,7 @@ func buildDDLLookup(allDDLs map[string]*parser.TableDDL, tableMatcher matcher.Ta
 
 // truncateExistingTables 清空所有已存在的表
 func truncateExistingTables(conn *database.Connection, existingTables []string, tracker *progress.Tracker, migrationCtx *migration.MigrationContext, cfg *config.Config) error {
+	defer cfg.Diagnostics.Global().Start(diagnostics.Truncate)()
 	logger.Infof("Truncating %d existing tables...", len(existingTables))
 
 	tracker.StartPhase("truncate-existing-tables", len(existingTables))
@@ -449,6 +537,8 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 				}
 
 				if err := conn.TruncateTable(tableName); err != nil {
+					cfg.Diagnostics.State(tableName, "failed", "not_run", 0)
+					cfg.Diagnostics.Error(tableName, diagnostics.Truncate, err)
 					logger.Errorf("[Worker %d] Failed to truncate table %s: %v", workerID, tableName, err)
 					tracker.FailPhaseItem()
 					totalFail.Add(1)
@@ -546,6 +636,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 				// 执行 CREATE TABLE
 				logger.Infof("[Worker %d] Creating table: %s", workerID, tableName)
 				if _, err := createTableDDL(conn, tableConverter, tableDDL); err != nil {
+					cfg.Diagnostics.Error(tableName, diagnostics.Create, err)
 					logger.Errorf("[Worker %d] Failed to create table %s: %v", workerID, tableName, err)
 					tracker.FailTable(tableName, fmt.Sprintf("Table creation failed: %v", err))
 					tracker.FailPhaseItem()
@@ -618,6 +709,8 @@ type rowCounter interface {
 }
 
 type rowCountValidationResult struct {
+	CountErr     error
+	CountError   bool
 	TableName    string
 	ExpectedRows int64
 	ActualRows   int64
@@ -651,6 +744,8 @@ func validateImportedRowCount(counter rowCounter, tableName string, expectedRows
 			ActualRows:   0,
 			Valid:        false,
 			ErrorMessage: fmt.Sprintf("failed to count rows for %s: %v", tableName, err),
+			CountError:   true,
+			CountErr:     err,
 		}
 	}
 	if actualRows != expectedRows {
@@ -751,13 +846,41 @@ func finalizeImportedTable(
 	result *importer.ImportResult,
 	elapsed time.Duration,
 ) {
-	if result == nil || result.Skipped {
+	if result == nil {
 		return
+	}
+	if result.Skipped {
+		cfg.Diagnostics.State(result.TableName, "missing", "not_run", 0)
+		return
+	}
+	stats := cfg.Diagnostics.TableStats(result.TableName)
+	countStatus := "not_run"
+	var count int64
+	defer func() {
+		state := "failed"
+		if result.Success && result.ErrorCount == 0 {
+			state = "success"
+		}
+		cfg.Diagnostics.State(result.TableName, state, countStatus, count)
+	}()
+	if !cfg.Migration.ShouldValidateRowCount() {
+		countStatus = "disabled"
 	}
 
 	validationFailed := false
 	if result.Success && result.ErrorCount == 0 && cfg.Migration.ShouldValidateRowCount() {
+		validationDone := stats.Start(diagnostics.Validation)
 		validation := validateImportedRowCount(counter, result.TableName, result.ProcessedRows)
+		validationDone()
+		count = validation.ActualRows
+		countStatus = "match"
+		if !validation.Valid {
+			countStatus = "mismatch"
+		}
+		if validation.CountError {
+			countStatus = "error"
+			cfg.Diagnostics.Error(result.TableName, diagnostics.Validation, validation.CountErr)
+		}
 		logger.Infof("Row count validation: table=%s csv_rows=%d mysql_rows=%d valid=%t",
 			result.TableName, validation.ExpectedRows, validation.ActualRows, validation.Valid)
 		if !validation.Valid {
@@ -780,7 +903,9 @@ func finalizeImportedTable(
 			logger.Warnf("Failed to mark table %s as completed: %v", result.TableName, err)
 		}
 		tracker.CompletePhaseItem()
+		registrationDone := stats.Start(diagnostics.Registration)
 		sink.appendCompleted(result.TableName, elapsed)
+		registrationDone()
 		return
 	}
 
@@ -971,6 +1096,7 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 				// 查找 CSV 文件路径
 				csvPath, ok := csvTableMap[tableMatcher.Key(tableName)]
 				if !ok {
+					cfg.Diagnostics.State(tableName, "missing", "not_run", 0)
 					// Call FindCSVFile directly to get the diagnostic with TriedPaths
 					_, _, diag := dataImporter.FindCSVFile(tableName)
 					logImportDiagnostic(diag)
@@ -1094,6 +1220,7 @@ func importDataAdaptive(
 	results := make([]*importer.ImportResult, 0, len(tablesToImport))
 
 	for _, skippedTable := range skipped {
+		cfg.Diagnostics.State(skippedTable.TableName, "missing", "not_run", 0)
 		_, _, diag := dataImporter.FindCSVFile(skippedTable.TableName)
 		logImportDiagnostic(diag)
 		if err := tracker.SkipTable(skippedTable.TableName, skippedTable.Reason); err != nil {
@@ -1118,6 +1245,7 @@ func importDataAdaptive(
 	)
 	dataImporter.WithPressureCallback(func(event importer.ImportPressureEvent) {
 		limiter.RecordPressure(event)
+		cfg.Diagnostics.Scheduling(limiter.UsedTokens(), limiter.DynamicLimit(), string(event.Signal), false)
 		logger.Warnf("Adaptive import pressure: table=%s batch=%d signal=%s detail=%s dynamic_tokens=%d",
 			event.TableName, event.BatchNum, event.Signal, event.Detail, limiter.DynamicLimit())
 	})
@@ -1134,15 +1262,22 @@ func importDataAdaptive(
 		if migrationCtx.Err() != nil {
 			break
 		}
-		limiter.TryRecover()
-		if err := limiter.Acquire(migrationCtx.Context(), candidate.Weight); err != nil {
+		recovered := limiter.TryRecover()
+		tokenDone := cfg.Diagnostics.TableStats(candidate.TableName).Start(diagnostics.TokenWait)
+		acquireErr := limiter.Acquire(migrationCtx.Context(), candidate.Weight)
+		tokenDone()
+		cfg.Diagnostics.Scheduling(limiter.UsedTokens(), limiter.DynamicLimit(), "", recovered)
+		if acquireErr != nil {
 			break
 		}
 		workerSlots <- struct{}{}
 		wg.Add(1)
 		go func(candidate importer.ImportCandidate) {
 			defer wg.Done()
-			defer limiter.Release(candidate.Weight)
+			defer func() {
+				limiter.Release(candidate.Weight)
+				cfg.Diagnostics.Scheduling(limiter.UsedTokens(), limiter.DynamicLimit(), "", false)
+			}()
 			defer func() { <-workerSlots }()
 
 			logger.Infof("Adaptive import start: table=%s class=%s size_mb=%d weight=%d dynamic_tokens=%d",

@@ -18,6 +18,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$PROJECT_DIR/dist"
+BUILD_VARIANT="${BUILD_VARIANT:-}"
+if [[ -n "$BUILD_VARIANT" ]]; then
+    if [[ ! "$BUILD_VARIANT" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Invalid BUILD_VARIANT (use letters, digits, underscore or dash)" >&2
+        exit 1
+    fi
+    DIST_DIR="$DIST_DIR/$BUILD_VARIANT"
+fi
 MAIN_PACKAGE="./cmd/migrate"
 
 # 颜色输出
@@ -120,8 +128,12 @@ build_platform() {
 
     cd "$PROJECT_DIR"
 
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
-        -ldflags="-s -w" \
+    # Prevent a failed build from being mistaken for a stale successful binary.
+    rm -f "$binary" "${binary}.sha256"
+    local build_tags=""
+    [[ "$BUILD_VARIANT" == "p0-baseline" ]] && build_tags="migration_baseline"
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -tags="$build_tags" \
+        -ldflags="-s -w -X main.BuildLabel=${BUILD_VARIANT:-p1}" \
         -trimpath \
         -o "$binary" \
         "$MAIN_PACKAGE"
@@ -171,9 +183,8 @@ main() {
         exit 1
     fi
 
-    # 清理旧产物
-    echo_step "清理旧产物..."
-    rm -rf "$DIST_DIR"
+    # Keep other platform/variant artifacts and local benchmark evidence.
+    echo_step "准备产物目录..."
     mkdir -p "$DIST_DIR"
 
     # 构建
@@ -182,7 +193,7 @@ main() {
     for p in "${platforms_to_build[@]}"; do
         IFS=':' read -r os arch desc <<< "$p"
         if build_platform "$os" "$arch" "$desc"; then
-            ((success++))
+            success=$((success + 1))
         else
             failed+=("$desc")
         fi

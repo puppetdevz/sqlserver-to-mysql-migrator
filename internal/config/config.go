@@ -2,10 +2,15 @@ package config
 
 import (
 	"fmt"
+	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/diagnostics"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
 )
 
 // Config 全局配置结构
@@ -16,6 +21,11 @@ type Config struct {
 	Logging   LoggingConfig   `yaml:"logging"`
 	Converter ConverterConfig `yaml:"converter"`
 
+	// Diagnostics is runtime-only and must never be serialized as effective configuration.
+	Diagnostics *diagnostics.Recorder `yaml:"-" json:"-"`
+	budgetOnce  sync.Once
+	budget      *migration.Budget
+	budgetErr   error
 	configFiles []string
 }
 
@@ -55,6 +65,7 @@ type AdaptiveImportConfig struct {
 
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
+	Resources                 ResourceConfig       `yaml:"resources"`
 	FastFail                  *bool                `yaml:"fast_fail"` // 遇错即停（true）或记录错误跳过（false）
 	TableNameCaseSensitive    *bool                `yaml:"table_name_case_sensitive"`
 	CountCSVRowsBeforeImport  *bool                `yaml:"count_csv_rows_before_import"`
@@ -391,17 +402,20 @@ func (m MigrationConfig) EffectiveSlowTableThresholdMinutes() int {
 
 // CLIArgs holds CLI flag values for diagnostic logging.
 type CLIArgs struct {
-	Tables            string
-	CreateOnly        bool
-	ReimportTables    bool
-	ReimportTableFile string
-	DryRun            bool
-	RemovePostfix     string
+	BaselineAlgorithms bool
+	Tables             string
+	CreateOnly         bool
+	ReimportTables     bool
+	ReimportTableFile  string
+	DryRun             bool
+	RemovePostfix      string
 }
 
 // LogEffective prints all effective configuration to the logger.
 func LogEffective(cfg *Config, cli CLIArgs) {
 	logger.Info("=== Effective Configuration ===")
+	logger.Infof("[runtime] gomaxprocs=%d gomemlimit_bytes=%d cpus=%d os=%s arch=%s", runtime.GOMAXPROCS(0), debug.SetMemoryLimit(-1), runtime.NumCPU(), runtime.GOOS, runtime.GOARCH)
+	logger.Info("  note: GOMAXPROCS is not a CPU affinity/quota; GOMEMLIMIT is a Go soft limit, not RSS")
 
 	logger.Info("[source]")
 	logger.Infof("  ddl_file: %s", cfg.Source.DDLFile)
@@ -428,6 +442,18 @@ func LogEffective(cfg *Config, cli CLIArgs) {
 	logger.Infof("  net_write_timeout: %ds", cfg.Target.EffectiveNetWriteTimeout())
 	logger.Infof("  net_read_timeout: %ds", cfg.Target.EffectiveNetReadTimeout())
 
+	limits := cfg.Migration.Resources.Effective()
+	logger.Info("[migration.resources]")
+	if cli.BaselineAlgorithms {
+		logger.Info("  enforcement: disabled in explicit P0 baseline build; count-only queue=10 (not a P1 memory-bounded strategy)")
+	} else {
+		logger.Infof("  max_inflight_bytes: %d", limits.MaxInflightBytes)
+		logger.Infof("  max_inflight_batches: %d", limits.MaxInflightBatches)
+		logger.Infof("  queue_bytes: %d", limits.QueueBytes)
+		logger.Infof("  queue_batches: %d", limits.QueueBatches)
+		logger.Infof("  batch_memory_bytes: %d", limits.BatchMemoryBytes)
+		logger.Infof("  sql_cache_bytes: %d", limits.SQLCacheBytes)
+	}
 	logger.Info("[migration]")
 	logger.Infof("  fast_fail: %t", cfg.Migration.IsFastFail())
 	logger.Infof("  table_name_case_sensitive: %t", cfg.Migration.IsTableNameCaseSensitive())

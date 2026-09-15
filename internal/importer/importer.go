@@ -714,6 +714,8 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 	}
 
 	reader := csv.NewReader(file)
+	// LazyQuotes matches dirty source CSV. It must not guess field counts;
+	// short/ambiguous rows still fail in repairDelimitedRow.
 	reader.LazyQuotes = true
 	reader.TrimLeadingSpace = true
 	reader.FieldsPerRecord = -1
@@ -1303,13 +1305,7 @@ func (er *ErrorRecorder) RecordError(tableName, sql string, rowData []string, er
 	er.errors = append(er.errors, record)
 
 	if er.file != nil {
-		fmt.Fprintf(er.file, "[%s] Table: %s, Error: %s\n", record.Timestamp.Format(time.RFC3339), tableName, err)
-		if sql != "" {
-			fmt.Fprintf(er.file, "  SQL: %s\n", sql)
-		}
-		if len(rowData) > 0 {
-			fmt.Fprintf(er.file, "  Row data (first 3): %v\n", record.RowData)
-		}
+		fmt.Fprintf(er.file, "[%s] table=%s stage=row err=%s\n", record.Timestamp.Format(time.RFC3339), tableName, err)
 	}
 }
 
@@ -1341,7 +1337,7 @@ func (er *ErrorRecorder) RecordBatchError(tableName string, batchNum int, rows [
 	er.errors = append(er.errors, record)
 
 	if er.file != nil {
-		fmt.Fprintf(er.file, "[%s] Table: %s, Batch: %d, Error: %s\n", record.Timestamp.Format(time.RFC3339), tableName, batchNum, err)
+		fmt.Fprintf(er.file, "[%s] table=%s batch=%d stage=batch err=%s\n", record.Timestamp.Format(time.RFC3339), tableName, batchNum, err)
 	}
 }
 
@@ -1605,7 +1601,6 @@ func NewPipelinedImporter(conn *database.Connection, cfg *config.Config, concurr
 // ImportMultiple 并发导入多张表
 func (pi *PipelinedImporter) ImportMultiple(tableNames []string) ([]*ImportResult, []string) {
 	results := make([]*ImportResult, 0, len(tableNames))
-	var failedTables []string
 
 	// 使用 worker pool 并发导入
 	tableChan := make(chan string, len(tableNames))
@@ -1632,7 +1627,6 @@ func (pi *PipelinedImporter) ImportMultiple(tableNames []string) ([]*ImportResul
 						Success:      false,
 						ErrorMessage: err.Error(),
 					}
-					failedTables = append(failedTables, tableName)
 				}
 				resultChan <- result
 			}
@@ -1651,9 +1645,12 @@ func (pi *PipelinedImporter) ImportMultiple(tableNames []string) ([]*ImportResul
 		close(resultChan)
 	}()
 
-	// 收集结果
+	var failedTables []string
 	for result := range resultChan {
 		results = append(results, result)
+		if result != nil && !result.Success {
+			failedTables = append(failedTables, result.TableName)
+		}
 	}
 
 	return results, failedTables

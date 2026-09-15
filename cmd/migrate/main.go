@@ -132,6 +132,10 @@ func runCLI() (exitCode int) {
 		fmt.Fprintln(os.Stderr, formatMigrationTotalDuration(migrationStartedAt, time.Now()))
 		return 1
 	}
+	if err := requireDiagnosticsOrError(); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 1
+	}
 	if *csvInventory != "" {
 		if err := writeCSVInventory(cfg, *csvInventory); err != nil {
 			fmt.Fprintf(os.Stderr, "CSV inventory failed: %v\n", err)
@@ -360,7 +364,10 @@ func runMigration(cfg *config.Config, conn *database.Connection, tracker *progre
 		if scanErr != nil {
 			return scanErr
 		}
-		csvMap := buildCSVTableMap(csvPaths, cfg.Source.CSVTimestamp, tableMatcher)
+		csvMap, mapErr := buildCSVTableMap(csvPaths, cfg.Source.CSVTimestamp, tableMatcher)
+		if mapErr != nil {
+			return mapErr
+		}
 		for _, name := range allTableNames {
 			scopeFiles[name] = csvMap[tableMatcher.Key(name)]
 		}
@@ -542,7 +549,7 @@ func truncateExistingTables(conn *database.Connection, existingTables []string, 
 					logger.Errorf("[Worker %d] Failed to truncate table %s: %v", workerID, tableName, err)
 					tracker.FailPhaseItem()
 					totalFail.Add(1)
-					if cfg.Migration.FastFail != nil && *cfg.Migration.FastFail {
+					if cfg.Migration.IsFastFail() {
 						migrationCtx.Stop(fmt.Errorf("failed to truncate table %s: %w", tableName, err))
 						return
 					}
@@ -702,6 +709,7 @@ func createAndTrackTables(cfg *config.Config, conn *database.Connection, missing
 
 type ddlExecutor interface {
 	ExecuteDDL(string) error
+	ExecuteStatements([]string) error
 }
 
 type rowCounter interface {
@@ -729,7 +737,11 @@ func createTableDDL(executor ddlExecutor, tableConverter *converter.TableConvert
 		return converter.ConvertResult{}, err
 	}
 
-	if err := executor.ExecuteDDL(result.SQL); err != nil {
+	stmts := result.Statements
+	if len(stmts) == 0 && result.SQL != "" {
+		stmts = []string{result.SQL}
+	}
+	if err := executor.ExecuteStatements(stmts); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -807,12 +819,15 @@ func (s *importCompletionSink) addMismatch(table string) {
 	s.mismatchTables = append(s.mismatchTables, table)
 }
 
-func (s *importCompletionSink) appendCompleted(table string, elapsed time.Duration) {
+func (s *importCompletionSink) appendCompleted(table string, elapsed time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.completedFile != nil {
 		if _, err := s.completedFile.WriteString(table + "\n"); err != nil {
-			logger.Warnf("Failed to record completed table %s: %v", table, err)
+			return fmt.Errorf("record completed table %s: %w", table, err)
+		}
+		if err := s.completedFile.Sync(); err != nil {
+			return fmt.Errorf("sync completed table %s: %w", table, err)
 		}
 	}
 	if s.slowThreshold > 0 && elapsed > s.slowThreshold {
@@ -820,10 +835,14 @@ func (s *importCompletionSink) appendCompleted(table string, elapsed time.Durati
 			table, elapsed.Truncate(time.Second), s.slowThreshold)
 		if s.slowFile != nil {
 			if _, err := s.slowFile.WriteString(table + "\n"); err != nil {
-				logger.Warnf("Failed to record slow table %s: %v", table, err)
+				return fmt.Errorf("record slow table %s: %w", table, err)
+			}
+			if err := s.slowFile.Sync(); err != nil {
+				return fmt.Errorf("sync slow table %s: %w", table, err)
 			}
 		}
 	}
+	return nil
 }
 
 func (s *importCompletionSink) writeLists() error {
@@ -896,17 +915,24 @@ func finalizeImportedTable(
 	}
 
 	if result.Success && result.ErrorCount == 0 {
-		if err := tracker.SetTableTotalRows(result.TableName, result.TotalRows); err != nil {
-			logger.Warnf("Failed to set total rows for %s: %v", result.TableName, err)
-		}
-		if err := tracker.CompleteTable(result.TableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
-			logger.Warnf("Failed to mark table %s as completed: %v", result.TableName, err)
-		}
-		tracker.CompletePhaseItem()
 		registrationDone := stats.Start(diagnostics.Registration)
-		sink.appendCompleted(result.TableName, elapsed)
+		err := sink.appendCompleted(result.TableName, elapsed)
 		registrationDone()
-		return
+		if err != nil {
+			logger.Errorf("Failed to persist completion for %s: %v", result.TableName, err)
+			result.Success = false
+			result.ErrorCount++
+			result.ErrorMessage = err.Error()
+		} else {
+			if err := tracker.SetTableTotalRows(result.TableName, result.TotalRows); err != nil {
+				logger.Warnf("Failed to set total rows for %s: %v", result.TableName, err)
+			}
+			if err := tracker.CompleteTable(result.TableName, result.ProcessedRows, result.InsertedRows, result.ErrorCount); err != nil {
+				logger.Warnf("Failed to mark table %s as completed: %v", result.TableName, err)
+			}
+			tracker.CompletePhaseItem()
+			return
+		}
 	}
 
 	failMsg := result.ErrorMessage
@@ -981,7 +1007,10 @@ func importDataWithCSVMapping(cfg *config.Config, conn *database.Connection, csv
 	}
 
 	// 从 CSV 文件名提取表名 -> CSV 文件路径 的映射
-	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
+	csvTableMap, err := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
+	if err != nil {
+		return err
+	}
 
 	// 构建允许表名的查找集合（O(1) 查找）
 	allowedByKey := make(map[string]string, len(allowedTables))
@@ -1350,25 +1379,23 @@ func finalizeCreateOnlyProgress(tracker *progress.Tracker, existingTables []stri
 }
 
 // buildCSVTableMap 从 CSV 文件列表构建表名 -> 文件路径映射
-func buildCSVTableMap(csvFiles []string, timestamp string, tableMatcher matcher.TableNameMatcher) map[string]string {
+func buildCSVTableMap(csvFiles []string, timestamp string, tableMatcher matcher.TableNameMatcher) (map[string]string, error) {
 	tableMap := make(map[string]string)
 
 	for _, csvPath := range csvFiles {
-		// 从文件路径提取表名
-		// 格式: origin_data_csvfiles/{TABLE_NAME}_{TIMESTAMP}.csv
 		fileName := filepath.Base(csvPath)
 		tableName := extractTableNameFromFile(fileName, timestamp)
-		if tableName != "" {
-			key := tableMatcher.Key(tableName)
-			if existing, ok := tableMap[key]; ok {
-				logger.Warnf("CSV table name conflict under current case-sensitivity setting: %s and %s", existing, csvPath)
-				continue
-			}
-			tableMap[key] = csvPath
+		if tableName == "" {
+			continue
 		}
+		key := tableMatcher.Key(tableName)
+		if existing, ok := tableMap[key]; ok {
+			return nil, fmt.Errorf("CSV table name conflict under current case-sensitivity setting: %s and %s", existing, csvPath)
+		}
+		tableMap[key] = csvPath
 	}
 
-	return tableMap
+	return tableMap, nil
 }
 
 // extractTableNameFromFile 从 CSV 文件名提取表名
@@ -1503,7 +1530,10 @@ func renameCSVFiles(postfix, dir string, dryRun bool) error {
 
 // previewCSVImport analyzes CSV-to-table matching without executing imports.
 func previewCSVImport(cfg *config.Config, csvFiles []string, allowedTables, existingTables []string, tableMatcher matcher.TableNameMatcher) error {
-	csvTableMap := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
+	csvTableMap, err := buildCSVTableMap(csvFiles, cfg.Source.CSVTimestamp, tableMatcher)
+	if err != nil {
+		return err
+	}
 	allowedSet := tableMatcher.BuildSet(allowedTables)
 	existingSet := tableMatcher.BuildSet(existingTables)
 

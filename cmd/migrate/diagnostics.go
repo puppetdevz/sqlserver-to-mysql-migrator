@@ -19,7 +19,15 @@ var (
 	reportOutput        = flag.String("report-output", "", "脱敏 tar.gz 输出文件（禁止覆盖）")
 	reportCompare       = flag.String("report-compare", "", "离线对照的 A 运行目录")
 	reportWith          = flag.String("report-with", "", "离线对照的 B 运行目录")
+	requireDiagnostics  = flag.Bool("require-diagnostics", false, "G1/基准写入前必须启用 --diagnostics-dir；默认 false")
 )
+
+func requireDiagnosticsOrError() error {
+	if *requireDiagnostics && *diagnosticsDir == "" {
+		return fmt.Errorf("--require-diagnostics needs --diagnostics-dir before any database connection")
+	}
+	return nil
+}
 
 func runOfflineReport() (bool, int) {
 	if *reportExport == "" && *reportCompare == "" && *reportOutput == "" && *reportWith == "" {

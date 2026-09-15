@@ -111,6 +111,15 @@ func (f *fakeDDLExecutor) ExecuteDDL(ddl string) error {
 	return err
 }
 
+func (f *fakeDDLExecutor) ExecuteStatements(statements []string) error {
+	for _, stmt := range statements {
+		if err := f.ExecuteDDL(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func TestCreateTableDDLDoesNotRetryOnMySQL1118(t *testing.T) {
 	tc := converter.NewTableConverter(config.ConverterConfig{
 		MaxVarcharToTextColumns:  999,
@@ -426,7 +435,10 @@ func TestBuildCSVTableMapCaseSensitive(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(true)
 	csvPath := "/tmp/sample_main_102_20000101000000.csv"
 
-	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	tableMap, err := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if _, ok := tableMap[tableMatcher.Key("SAMPLE_MAIN_102")]; ok {
 		t.Fatal("buildCSVTableMap matched different case in case-sensitive mode")
@@ -440,7 +452,10 @@ func TestBuildCSVTableMapCaseInsensitive(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(false)
 	csvPath := "/tmp/sample_main_102_20000101000000.csv"
 
-	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	tableMap, err := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := tableMap[tableMatcher.Key("SAMPLE_MAIN_102")]; got != csvPath {
 		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
@@ -451,7 +466,10 @@ func TestBuildCSVTableMapDollarTableWithTimestamp(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(true)
 	csvPath := "/tmp/TABLE__20000101000000.csv"
 
-	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	tableMap, err := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := tableMap[tableMatcher.Key("TABLE$")]; got != csvPath {
 		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)
@@ -462,7 +480,10 @@ func TestBuildCSVTableMapDollarTableWithTimestampCaseInsensitive(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(false)
 	csvPath := "/tmp/table__20000101000000.csv"
 
-	tableMap := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	tableMap, err := buildCSVTableMap([]string{csvPath}, "20000101000000", tableMatcher)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := tableMap[tableMatcher.Key("TABLE$")]; got != csvPath {
 		t.Fatalf("buildCSVTableMap actual path = %q, want %q", got, csvPath)

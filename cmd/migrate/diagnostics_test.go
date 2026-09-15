@@ -25,6 +25,20 @@ func TestDiagnosticsFailsBeforeDatabaseForInvalidKey(t *testing.T) {
 		t.Fatal("short key accepted")
 	}
 }
+func TestRequireDiagnosticsWithoutDir(t *testing.T) {
+	oldReq, oldDir := *requireDiagnostics, *diagnosticsDir
+	t.Cleanup(func() { *requireDiagnostics = oldReq; *diagnosticsDir = oldDir })
+	*requireDiagnostics = true
+	*diagnosticsDir = ""
+	if err := requireDiagnosticsOrError(); err == nil {
+		t.Fatal("expected missing diagnostics dir to fail")
+	}
+	*requireDiagnostics = false
+	if err := requireDiagnosticsOrError(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOfflineModeDoesNotLoadConfiguration(t *testing.T) {
 	oldExport, oldOutput, oldCompare, oldWith, oldConfig := *reportExport, *reportOutput, *reportCompare, *reportWith, *configPath
 	t.Cleanup(func() {

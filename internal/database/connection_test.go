@@ -9,7 +9,9 @@ import (
 func TestConnectionActualTableNameCaseSensitive(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(true)
 	conn := &Connection{tableMatcher: &tableMatcher}
-	conn.buildTableNameMap([]string{"sample_main_102"})
+	if err := conn.buildTableNameMap([]string{"sample_main_102"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := conn.GetActualTableName("SAMPLE_MAIN_102"); got != "SAMPLE_MAIN_102" {
 		t.Fatalf("GetActualTableName() = %q, want original requested name", got)
@@ -22,7 +24,9 @@ func TestConnectionActualTableNameCaseSensitive(t *testing.T) {
 func TestConnectionActualTableNameCaseInsensitive(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(false)
 	conn := &Connection{tableMatcher: &tableMatcher}
-	conn.buildTableNameMap([]string{"sample_main_102"})
+	if err := conn.buildTableNameMap([]string{"sample_main_102"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := conn.GetActualTableName("SAMPLE_MAIN_102"); got != "sample_main_102" {
 		t.Fatalf("GetActualTableName() = %q, want actual table name", got)
@@ -32,7 +36,9 @@ func TestConnectionActualTableNameCaseInsensitive(t *testing.T) {
 func TestConnectionTableExistsUsesMatcher(t *testing.T) {
 	tableMatcher := matcher.NewTableNameMatcher(false)
 	conn := &Connection{tableMatcher: &tableMatcher}
-	conn.buildTableNameMap([]string{"sample_main_102"})
+	if err := conn.buildTableNameMap([]string{"sample_main_102"}); err != nil {
+		t.Fatal(err)
+	}
 
 	exists, err := conn.TableExists("SAMPLE_MAIN_102")
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/parser"
 )
 
@@ -27,6 +28,7 @@ type ConvertOptions struct{}
 // ConvertResult is the structured DDL conversion output used by migration code.
 type ConvertResult struct {
 	SQL               string
+	Statements        []string
 	Mode              ConvertMode
 	EstimatedRowBytes int
 }
@@ -60,7 +62,9 @@ func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, _ Conv
 	result := ConvertResult{Mode: ConvertModeNormal}
 
 	// CREATE TABLE
-	ddl.WriteString(fmt.Sprintf("CREATE TABLE `%s` (\n", tableDDL.TableName))
+	ddl.WriteString("CREATE TABLE ")
+	ddl.WriteString(matcher.QuoteIdent(tableDDL.TableName))
+	ddl.WriteString(" (\n")
 
 	// 记录哪些列会被转为 TEXT（用于后续跳过索引）
 	textColumns := make(map[string]bool)
@@ -142,8 +146,14 @@ func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, _ Conv
 				}
 				if !hasTextInPK {
 					ddl.WriteString(",\n")
-					ddl.WriteString(fmt.Sprintf("  PRIMARY KEY (`%s`)\n",
-						strings.Join(tableDDL.PrimaryKey.Columns, "`, `")))
+					ddl.WriteString("  PRIMARY KEY (")
+					for i, col := range tableDDL.PrimaryKey.Columns {
+						if i > 0 {
+							ddl.WriteString(", ")
+						}
+						ddl.WriteString(matcher.QuoteIdent(col))
+					}
+					ddl.WriteString(")\n")
 				} else {
 					ddl.WriteString("\n")
 				}
@@ -153,18 +163,19 @@ func (tc *TableConverter) ConvertToMySQLResult(tableDDL *parser.TableDDL, _ Conv
 		}
 	}
 
-	ddl.WriteString(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;\n")
+	ddl.WriteString(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC")
+	createSQL := ddl.String()
+	result.Statements = append(result.Statements, createSQL)
 
 	// 索引 - 跳过包含 TEXT 列的索引
 	for _, index := range tableDDL.Indexes {
 		indexDDL := tc.convertIndex(tableDDL.TableName, index, textColumns)
 		if indexDDL != "" {
-			ddl.WriteString("\n")
-			ddl.WriteString(indexDDL)
+			result.Statements = append(result.Statements, strings.TrimSuffix(indexDDL, ";"))
 		}
 	}
 
-	result.SQL = ddl.String()
+	result.SQL = strings.Join(result.Statements, ";\n") + ";\n"
 	return result, nil
 }
 
@@ -178,7 +189,8 @@ func (tc *TableConverter) convertColumnWithTextCheck(
 	if forceTextColumns[column.Name] {
 		textColumns[column.Name] = true
 		var def strings.Builder
-		def.WriteString(fmt.Sprintf("`%s` text", column.Name))
+		def.WriteString(matcher.QuoteIdent(column.Name))
+		def.WriteString(" text")
 		if !column.Nullable {
 			def.WriteString(" NOT NULL")
 		} else {
@@ -206,7 +218,9 @@ func (tc *TableConverter) convertColumnWithTextCheck(
 
 	// 构建列定义
 	var def strings.Builder
-	def.WriteString(fmt.Sprintf("`%s` %s", column.Name, mysqlType))
+	def.WriteString(matcher.QuoteIdent(column.Name))
+	def.WriteString(" ")
+	def.WriteString(mysqlType)
 
 	// NULL/NOT NULL
 	if !column.Nullable {
@@ -293,9 +307,9 @@ func (tc *TableConverter) convertIndex(tableName string, index parser.IndexDef, 
 
 	columns := make([]string, len(index.Columns))
 	for i, col := range index.Columns {
-		columns[i] = fmt.Sprintf("`%s`", col)
+		columns[i] = matcher.QuoteIdent(col)
 	}
 
-	return fmt.Sprintf("CREATE %s `%s` ON `%s` (%s);",
-		indexType, index.Name, tableName, strings.Join(columns, ", "))
+	return fmt.Sprintf("CREATE %s %s ON %s (%s);",
+		indexType, matcher.QuoteIdent(index.Name), matcher.QuoteIdent(tableName), strings.Join(columns, ", "))
 }

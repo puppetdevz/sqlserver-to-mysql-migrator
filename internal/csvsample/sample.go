@@ -41,6 +41,8 @@ func Extract(src, dest string, limit int, hasHeader bool) (int, error) {
 	}()
 	reader := csv.NewReader(in)
 	reader.FieldsPerRecord = -1
+	// LazyQuotes matches production import for dirty source quotes. Field-count
+	// repair is still done by importer.repairDelimitedRow, not by this flag.
 	reader.LazyQuotes = true
 	writer := csv.NewWriter(out)
 	copied := 0

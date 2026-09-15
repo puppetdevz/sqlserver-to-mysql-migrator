@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func writeConfigForTest(t *testing.T, body string) string {
@@ -58,17 +60,52 @@ func TestGetDSNInitializesNetworkTimeoutsPerConnection(t *testing.T) {
 		ReadTimeout:  700,
 	}
 
+	driverCfg, err := cfg.DriverConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driverCfg.WriteTimeout != 600*time.Second || driverCfg.ReadTimeout != 700*time.Second {
+		t.Fatalf("timeouts write=%s read=%s", driverCfg.WriteTimeout, driverCfg.ReadTimeout)
+	}
 	dsn := cfg.GetDSN()
-
 	for _, want := range []string{
-		"writeTimeout=600s",
-		"readTimeout=700s",
 		"net_write_timeout=600",
 		"net_read_timeout=700",
+		"innodb_strict_mode=OFF",
 	} {
 		if !strings.Contains(dsn, want) {
 			t.Fatalf("GetDSN() = %q, want it to contain %q", dsn, want)
 		}
+	}
+	parsed, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.WriteTimeout != 600*time.Second || parsed.ReadTimeout != 700*time.Second {
+		t.Fatalf("parsed timeouts write=%s read=%s", parsed.WriteTimeout, parsed.ReadTimeout)
+	}
+}
+
+func TestDriverConfigEscapesPasswordAndRejectsBadCharset(t *testing.T) {
+	cfg := TargetConfig{Host: "h", Port: 3306, Database: "db", User: "u", Password: "p@ss:w/d", Charset: "utf8mb4"}
+	driverCfg, err := cfg.DriverConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := mysql.ParseDSN(driverCfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Passwd != "p@ss:w/d" || parsed.User != "u" || parsed.DBName != "db" {
+		t.Fatalf("parsed %+v", parsed)
+	}
+	if parsed.Params["innodb_strict_mode"] != "OFF" {
+		t.Fatalf("session whitelist missing: %+v", parsed.Params)
+	}
+	bad := cfg
+	bad.Charset = "utf8mb4;drop"
+	if _, err := bad.DriverConfig(); err == nil {
+		t.Fatal("invalid charset accepted")
 	}
 }
 

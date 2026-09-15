@@ -201,3 +201,39 @@ id int NULL
 		t.Fatal("ParseTable(Bar) error = nil, want not found")
 	}
 }
+
+func TestParseAllReturnsErrorWhenOneTableBlockFails(t *testing.T) {
+	content := `-- V80.dbo.Good definition
+CREATE TABLE V80.dbo.Good (
+id int NULL
+);
+-- V80.dbo.Bad definition
+-- no create table statement
+`
+	_, err := NewDDLParser(writeParserDDL(t, content)).ParseAll()
+	if err == nil {
+		t.Fatal("ParseAll() error = nil, want parse failure")
+	}
+	if !strings.Contains(err.Error(), "Bad") && !strings.Contains(err.Error(), "CREATE TABLE") {
+		t.Fatalf("error = %v, want Bad/CREATE TABLE clue", err)
+	}
+}
+
+func TestParseAllTwoValidTablesStillSucceeds(t *testing.T) {
+	content := `-- V80.dbo.A definition
+CREATE TABLE V80.dbo.A (
+id int NULL
+);
+-- V80.dbo.B definition
+CREATE TABLE V80.dbo.B (
+name varchar(10) NULL
+);
+`
+	tables, err := NewDDLParser(writeParserDDL(t, content)).ParseAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 2 {
+		t.Fatalf("len=%d", len(tables))
+	}
+}

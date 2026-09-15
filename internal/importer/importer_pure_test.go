@@ -836,8 +836,8 @@ func TestRecordErrorWithFile(t *testing.T) {
 		t.Fatal("file should not be nil when log file is provided")
 	}
 
-	recorder.RecordError("users", "INSERT INTO users (id) VALUES (1)", []string{"1", "John", "extra"}, fmt.Errorf("test error"))
-	recorder.RecordBatchError("orders", 5, [][]interface{}{{42, "item"}}, fmt.Errorf("batch failed"))
+	recorder.RecordError("users", "INSERT INTO users (id) VALUES (1)", []string{"1", "secret-password", "extra"}, fmt.Errorf("test error"))
+	recorder.RecordBatchError("orders", 5, [][]interface{}{{42, "secret-password"}}, fmt.Errorf("batch failed"))
 
 	// verify in-memory records
 	errs := recorder.GetErrors()
@@ -862,11 +862,15 @@ func TestRecordErrorWithFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read log file: %v", err)
 	}
-	if !strings.Contains(string(content), "users") {
+	text := string(content)
+	if !strings.Contains(text, "users") {
 		t.Error("log file should contain 'users'")
 	}
-	if !strings.Contains(string(content), "orders") {
+	if !strings.Contains(text, "orders") {
 		t.Error("log file should contain 'orders'")
+	}
+	if strings.Contains(text, "secret-password") || strings.Contains(text, "INSERT INTO users") {
+		t.Fatalf("error log leaked business data: %s", text)
 	}
 }
 

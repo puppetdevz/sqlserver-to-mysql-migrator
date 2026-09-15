@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
 )
 
 // ErrUnknownCommit is returned when a statement may already have been committed
@@ -180,7 +181,6 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 			bi.stmt = nil
 		}
 
-		// 释放锁后再 Prepare，避免长时间持有写锁阻塞其他 goroutine
 		bi.stmtMu.Unlock()
 		prepareDone := bi.stats.Start(diagnostics.Prepare)
 		stmt, err := bi.db.PrepareContext(bi.ctx, query)
@@ -192,6 +192,16 @@ func (bi *BatchInserter) getStmt(query string, canCache bool) (*sql.Stmt, bool, 
 		}
 
 		bi.stmtMu.Lock()
+		if bi.stmt != nil && bi.cachedQuery == query && bi.cachedDB == bi.db {
+			cached := bi.stmt
+			bi.stmtMu.Unlock()
+			stmt.Close()
+			bi.stats.Add(func(c *diagnostics.Counters) { c.CacheHits++ })
+			return cached, false, nil
+		}
+		if bi.stmt != nil {
+			bi.stmt.Close()
+		}
 		bi.stmt = stmt
 		bi.cachedQuery = query
 		bi.cachedDB = bi.db
@@ -486,7 +496,7 @@ func widenedTextType(dataType string) (string, bool) {
 }
 
 func quoteIdentifier(identifier string) string {
-	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
+	return matcher.QuoteIdent(identifier)
 }
 
 func (bi *BatchInserter) resetStmt() {

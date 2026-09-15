@@ -55,3 +55,21 @@ func TestExtractRefusesOverwriteAndPhysicalSplitAssumptions(t *testing.T) {
 		t.Fatal("in-place extract accepted")
 	}
 }
+
+func TestExtractLazyQuotesMatchesImporterContract(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "dirty.csv")
+	// Unescaped quote inside a field; LazyQuotes allows this.
+	original := "id,value\n1,he said \"hi\"\n"
+	if err := os.WriteFile(src, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "out.csv")
+	n, err := Extract(src, dest, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("copied %d", n)
+	}
+}

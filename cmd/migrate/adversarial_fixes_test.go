@@ -22,7 +22,7 @@ import (
 func expectCreateTable(t *testing.T, mock sqlmock.Sqlmock, table string, err error) {
 	t.Helper()
 	sql := convertSimpleCreateSQL(t, table)
-	stmt := strings.TrimSpace(strings.Split(sql, ";")[0]) + ";"
+	stmt := strings.TrimSpace(strings.Split(sql, ";")[0])
 	exec := mock.ExpectExec(stmt)
 	if err != nil {
 		exec.WillReturnError(err)

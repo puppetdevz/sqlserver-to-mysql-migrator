@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/matcher"
@@ -27,34 +27,24 @@ func NewConnection(cfg *config.TargetConfig) (*Connection, error) {
 
 // NewConnectionWithMatcher 使用指定表名匹配器创建新的数据库连接
 func NewConnectionWithMatcher(cfg *config.TargetConfig, tableMatcher matcher.TableNameMatcher) (*Connection, error) {
-	// 打开数据库连接
-	db, err := sql.Open("mysql", cfg.GetDSN())
+	driverCfg, err := cfg.DriverConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("invalid target database config: %w", err)
 	}
+	connector, err := mysql.NewConnector(driverCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database connector: %w", err)
+	}
+	db := sql.OpenDB(connector)
 
-	// 配置连接池
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.GetConnMaxLifetime())
 	db.SetConnMaxIdleTime(5 * time.Minute)
 
-	// 测试连接
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	// 禁用 innodb_strict_mode 以支持超宽表（允许 ROW_FORMAT=COMPRESSED 下超出行大小限制的表）
-	if _, err := db.Exec("SET SESSION innodb_strict_mode = OFF"); err != nil {
-		logger.Warnf("Failed to set innodb_strict_mode=OFF: %v", err)
-	}
-	// 增加会话级网络超时，防止大批次插入时 MySQL 服务端断开连接
-	if _, err := db.Exec("SET SESSION net_write_timeout = 600"); err != nil {
-		logger.Warnf("Failed to set net_write_timeout=600: %v", err)
-	}
-	if _, err := db.Exec("SET SESSION net_read_timeout = 600"); err != nil {
-		logger.Warnf("Failed to set net_read_timeout=600: %v", err)
 	}
 
 	logger.Infof("Database connected: %s@%s:%d/%s", cfg.User, cfg.Host, cfg.Port, cfg.Database)
@@ -106,34 +96,31 @@ func (c *Connection) GetTableNames() ([]string, error) {
 		return nil, fmt.Errorf("error iterating tables: %w", err)
 	}
 
-	// 填充表名映射
-	c.buildTableNameMap(tables)
-
+	if err := c.buildTableNameMap(tables); err != nil {
+		return nil, err
+	}
 	return tables, nil
 }
 
-// buildTableNameMap 构建表名映射（匹配器 key -> 实际）
-func (c *Connection) buildTableNameMap(tables []string) {
-	c.tableNameMap = make(map[string]string)
+// buildTableNameMap 构建表名映射（匹配器 key -> 实际）。重复 key 在任何写入前失败。
+func (c *Connection) buildTableNameMap(tables []string) error {
+	next := make(map[string]string, len(tables))
 	tableMatcher := c.matcher()
 	for _, t := range tables {
 		key := tableMatcher.Key(t)
-		if existing, ok := c.tableNameMap[key]; ok {
-			logger.Warnf("Duplicate table name match key %q: keeping %q, ignoring %q", key, existing, t)
-			continue
+		if existing, ok := next[key]; ok {
+			return fmt.Errorf("target table name conflict under current case-sensitivity setting: %s and %s", existing, t)
 		}
-		c.tableNameMap[key] = t
+		next[key] = t
 	}
+	c.tableNameMap = next
+	return nil
 }
 
 // RefreshTableNameMap 刷新表名映射（在创建新表后调用）
 func (c *Connection) RefreshTableNameMap() error {
-	tables, err := c.GetTableNames()
-	if err != nil {
-		return err
-	}
-	c.buildTableNameMap(tables)
-	return nil
+	_, err := c.GetTableNames()
+	return err
 }
 
 // GetActualTableName 获取正确大小写的表名
@@ -171,25 +158,24 @@ func (c *Connection) TableExists(tableName string) (bool, error) {
 	return exists, nil
 }
 
-// ExecuteDDL 执行 DDL 语句（支持多语句，用分号分隔）
+// ExecuteDDL 执行单条 DDL 语句。多语句必须用 ExecuteStatements，禁止按分号切开。
 func (c *Connection) ExecuteDDL(ddl string) error {
-	// 分割多语句（按分号分隔）
-	statements := strings.Split(ddl, ";")
+	stmt := strings.TrimSpace(ddl)
+	if stmt == "" {
+		return nil
+	}
+	_, err := c.DB.Exec(stmt)
+	if err != nil {
+		return fmt.Errorf("failed to execute DDL [%s]: %w", stmt, err)
+	}
+	return nil
+}
 
+// ExecuteStatements 按独立完整语句执行，不扫描分号。
+func (c *Connection) ExecuteStatements(statements []string) error {
 	for _, stmt := range statements {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-
-		// 确保语句以分号结尾（MySQL DDL 推荐格式）
-		if !strings.HasSuffix(stmt, ";") {
-			stmt = stmt + ";"
-		}
-
-		_, err := c.DB.Exec(stmt)
-		if err != nil {
-			return fmt.Errorf("failed to execute DDL [%s]: %w", stmt, err)
+		if err := c.ExecuteDDL(stmt); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -198,7 +184,7 @@ func (c *Connection) ExecuteDDL(ddl string) error {
 // TruncateTable 清空表数据
 func (c *Connection) TruncateTable(tableName string) error {
 	actualName := c.GetActualTableName(tableName)
-	query := fmt.Sprintf("TRUNCATE TABLE `%s`", actualName)
+	query := fmt.Sprintf("TRUNCATE TABLE %s", matcher.QuoteIdent(actualName))
 	_, err := c.DB.Exec(query)
 	if err != nil {
 		return fmt.Errorf("failed to truncate table %s: %w", actualName, err)
@@ -209,7 +195,7 @@ func (c *Connection) TruncateTable(tableName string) error {
 // GetRowCount 获取表的行数
 func (c *Connection) GetRowCount(tableName string) (int64, error) {
 	actualName := c.GetActualTableName(tableName)
-	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", actualName)
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", matcher.QuoteIdent(actualName))
 	var count int64
 	err := c.DB.QueryRow(query).Scan(&count)
 	if err != nil {

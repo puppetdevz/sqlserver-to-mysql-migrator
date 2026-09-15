@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -61,12 +62,12 @@ func (p *DDLParser) ParseAll() (map[string]*TableDDL, error) {
 	// 按表分割
 	tables := make(map[string]*TableDDL)
 	tableBlocks := p.splitByTable(string(content))
+	var parseErrs []error
 
 	for _, block := range tableBlocks {
 		tableDDL, err := p.parseTableBlock(block)
 		if err != nil {
-			// 记录错误但继续处理其他表
-			fmt.Printf("Warning: failed to parse table: %v\n", err)
+			parseErrs = append(parseErrs, err)
 			continue
 		}
 		if tableDDL != nil {
@@ -75,6 +76,9 @@ func (p *DDLParser) ParseAll() (map[string]*TableDDL, error) {
 			}
 			tables[tableDDL.TableName] = tableDDL
 		}
+	}
+	if len(parseErrs) > 0 {
+		return nil, errors.Join(parseErrs...)
 	}
 
 	return tables, nil

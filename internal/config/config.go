@@ -2,12 +2,16 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/diagnostics"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/logger"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/migration"
@@ -221,19 +225,48 @@ func (c ConverterConfig) IsEffectiveMaxVarcharToTextSize() int {
 	return c.MaxVarcharToTextSize
 }
 
-// GetDSN 生成 MySQL DSN 连接字符串
-func (t *TargetConfig) GetDSN() string {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=true&loc=Local",
-		t.User, t.Password, t.Host, t.Port, t.Database, t.Charset)
+var charsetPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// DriverConfig builds a typed mysql.Config. Session params are a whitelist applied
+// by the driver on every physical Connect, not a one-shot db.Exec after Ping.
+func (t *TargetConfig) DriverConfig() (*mysql.Config, error) {
+	charset := t.Charset
+	if charset == "" {
+		charset = "utf8mb4"
+	}
+	if !charsetPattern.MatchString(charset) {
+		return nil, fmt.Errorf("invalid target.charset %q", charset)
+	}
+	cfg := mysql.NewConfig()
+	cfg.User = t.User
+	cfg.Passwd = t.Password
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(t.Host, strconv.Itoa(t.Port))
+	cfg.DBName = t.Database
+	cfg.ParseTime = true
+	cfg.Loc = time.Local
+	cfg.Params = map[string]string{
+		"charset":            charset,
+		"innodb_strict_mode": "OFF",
+		"net_write_timeout":  strconv.Itoa(t.EffectiveNetWriteTimeout()),
+		"net_read_timeout":   strconv.Itoa(t.EffectiveNetReadTimeout()),
+	}
 	if t.EffectiveWriteTimeout() > 0 {
-		dsn += fmt.Sprintf("&writeTimeout=%ds", t.EffectiveWriteTimeout())
-		dsn += fmt.Sprintf("&net_write_timeout=%d", t.EffectiveNetWriteTimeout())
+		cfg.WriteTimeout = time.Duration(t.EffectiveWriteTimeout()) * time.Second
 	}
 	if t.EffectiveReadTimeout() > 0 {
-		dsn += fmt.Sprintf("&readTimeout=%ds", t.EffectiveReadTimeout())
-		dsn += fmt.Sprintf("&net_read_timeout=%d", t.EffectiveNetReadTimeout())
+		cfg.ReadTimeout = time.Duration(t.EffectiveReadTimeout()) * time.Second
 	}
-	return dsn
+	return cfg, nil
+}
+
+// GetDSN 生成 MySQL DSN 连接字符串（驱动转义，禁止明文拼接密码）。
+func (t *TargetConfig) GetDSN() string {
+	cfg, err := t.DriverConfig()
+	if err != nil {
+		return ""
+	}
+	return cfg.FormatDSN()
 }
 
 // EffectiveWriteTimeout 返回有效的写超时（秒），0 时返回默认值 30

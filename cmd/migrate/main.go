@@ -80,6 +80,9 @@ func logImportDiagnostic(diag *importer.ImportDiagnostic) {
 }
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "export-sqlserver" || os.Args[1] == "import-bundle") {
+		os.Exit(runBundleCLI(os.Args[1:]))
+	}
 	os.Exit(runCLI())
 }
 

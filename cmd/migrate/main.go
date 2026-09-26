@@ -1556,13 +1556,14 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 		return
 	}
 
-	errors := recorder.GetErrors()
-	if len(errors) == 0 {
+	total := recorder.GetErrorCount()
+	if total == 0 {
 		return
 	}
+	errors := recorder.GetErrors()
 
 	logger.Warn("=== Error Summary ===")
-	logger.Warnf("Total errors recorded: %d", len(errors))
+	logger.Warnf("Total errors recorded: %d (retained samples: %d)", total, len(errors))
 
 	if len(failedTables) > 0 {
 		logger.Warn("Failed tables:")
@@ -1582,7 +1583,7 @@ func printErrorSummary(recorder *importer.ErrorRecorder, failedTables []string) 
 		errorTypes[errMsg]++
 	}
 
-	logger.Warn("Error types breakdown:")
+	logger.Warn("Error types breakdown (retained samples only):")
 	for errType, count := range errorTypes {
 		logger.Warnf("  - %s: %d occurrences", errType, count)
 	}

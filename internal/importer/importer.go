@@ -257,6 +257,20 @@ func countMatchedColumns(csvHeaders []string, dbColumns []string) int {
 	return matched
 }
 
+// A short header can describe the leading DB columns while its data rows
+// contain the full layout. Never infer positional mapping from row width alone.
+func headerMatchesDBPrefix(headers, dbColumns []string) bool {
+	if len(headers) == 0 || len(headers) >= len(dbColumns) {
+		return false
+	}
+	for i, header := range headers {
+		if !strings.EqualFold(header, dbColumns[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func alignColumnInfos(headers []string, dbColumnInfos []dbColumnInfo) []dbColumnInfo {
 	dbInfoMap := make(map[string]dbColumnInfo, len(dbColumnInfos))
 	for _, info := range dbColumnInfos {
@@ -769,12 +783,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 
 		if dbColumns != nil {
 			matchedColumns := countMatchedColumns(headers, dbColumns)
+			if matchedColumns == 0 {
+				return nil, fmt.Errorf("CSV header has no matching DB columns for %s; set source.csv_has_header: false only after confirming the file has no header", ti.tableName), nil
+			}
 			switch {
-			case matchedColumns == 0 && len(headers) == len(dbColumns):
-				logger.Warnf("Table %s: configured CSV header but first row does not match DB columns; importing as no-header CSV", ti.tableName)
-				firstRow = headers
-				headers = dbColumns
-				useHeaderMapping = false
 			case len(headers) != len(dbColumns):
 				peekRow, err := reader.Read()
 				if err == io.EOF {
@@ -793,7 +805,10 @@ func (ti *TableImporter) pipelinedImport(file *os.File, actualTableName string, 
 				}
 				firstRow = peekRow
 				if len(peekRow) == len(dbColumns) {
-					logger.Warnf("Table %s: CSV header has %d columns but data rows and DB have %d columns; falling back to DB column order",
+					if !headerMatchesDBPrefix(headers, dbColumns) {
+						return nil, fmt.Errorf("CSV header column order is not a DB prefix for %s; refusing positional fallback", ti.tableName), nil
+					}
+					logger.Warnf("Table %s: CSV header matches %d leading DB columns and data rows have %d columns; falling back to DB column order",
 						ti.tableName, len(headers), len(dbColumns))
 					headers = dbColumns
 					useHeaderMapping = false
@@ -1239,11 +1254,18 @@ func limitSlice(s []string, max int) []string {
 }
 
 // ErrorRecorder 错误记录器
+const (
+	maxErrorSamples    = 128
+	maxErrorTextBytes  = 256
+	maxErrorFieldBytes = 128
+)
+
 type ErrorRecorder struct {
-	mu      sync.Mutex
-	errors  []ErrorRecord
-	file    *os.File
-	enabled bool
+	mu          sync.Mutex
+	errors      []ErrorRecord // bounded samples; the exact count is kept separately
+	totalErrors int
+	file        *os.File
+	enabled     bool
 }
 
 type ErrorRecord struct {
@@ -1280,6 +1302,18 @@ func NewErrorRecorder(logFile string) (*ErrorRecorder, error) {
 	return recorder, nil
 }
 
+// boundErrorText limits retained samples without cutting a UTF-8 code point.
+func boundErrorText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit - len("...")
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
 // RecordError 记录错误
 func (er *ErrorRecorder) RecordError(tableName, sql string, rowData []string, err error) {
 	if !er.enabled {
@@ -1289,23 +1323,23 @@ func (er *ErrorRecorder) RecordError(tableName, sql string, rowData []string, er
 	er.mu.Lock()
 	defer er.mu.Unlock()
 
-	record := ErrorRecord{
-		TableName: tableName,
-		Timestamp: time.Now(),
-		SQL:       sql,
-		Error:     err.Error(),
+	er.totalErrors++
+	now := time.Now()
+	if len(er.errors) < maxErrorSamples {
+		record := ErrorRecord{
+			TableName: tableName,
+			Timestamp: now,
+			SQL:       boundErrorText(sql, maxErrorTextBytes),
+			Error:     boundErrorText(err.Error(), maxErrorTextBytes),
+		}
+		for _, value := range rowData[:min(len(rowData), 3)] {
+			record.RowData = append(record.RowData, boundErrorText(value, maxErrorFieldBytes))
+		}
+		er.errors = append(er.errors, record)
 	}
-
-	if len(rowData) > 3 {
-		record.RowData = rowData[:3]
-	} else {
-		record.RowData = rowData
-	}
-
-	er.errors = append(er.errors, record)
 
 	if er.file != nil {
-		fmt.Fprintf(er.file, "[%s] table=%s stage=row err=%s\n", record.Timestamp.Format(time.RFC3339), tableName, err)
+		fmt.Fprintf(er.file, "[%s] table=%s stage=row err=%s\n", now.Format(time.RFC3339), tableName, err)
 	}
 }
 
@@ -1318,26 +1352,35 @@ func (er *ErrorRecorder) RecordBatchError(tableName string, batchNum int, rows [
 	er.mu.Lock()
 	defer er.mu.Unlock()
 
-	// 取第一批行数据作为示例
-	var sampleRows []string
-	if len(rows) > 0 {
-		for i := 0; i < len(rows[0]) && len(sampleRows) < 3; i++ {
-			sampleRows = append(sampleRows, fmt.Sprintf("%v", rows[0][i]))
+	er.totalErrors++
+	now := time.Now()
+	if len(er.errors) < maxErrorSamples {
+		record := ErrorRecord{
+			TableName: tableName,
+			BatchNum:  batchNum,
+			Timestamp: now,
+			Error:     boundErrorText(err.Error(), maxErrorTextBytes),
 		}
+		if len(rows) > 0 {
+			for _, value := range rows[0][:min(len(rows[0]), 3)] {
+				// Avoid formatting the entire cell just to retain a short sample.
+				var text string
+				switch v := value.(type) {
+				case string:
+					text = v
+				case []byte:
+					text = string(v[:min(len(v), maxErrorFieldBytes)])
+				default:
+					text = fmt.Sprintf("%v", v)
+				}
+				record.RowData = append(record.RowData, boundErrorText(text, maxErrorFieldBytes))
+			}
+		}
+		er.errors = append(er.errors, record)
 	}
-
-	record := ErrorRecord{
-		TableName: tableName,
-		BatchNum:  batchNum,
-		Timestamp: time.Now(),
-		Error:     err.Error(),
-		RowData:   sampleRows,
-	}
-
-	er.errors = append(er.errors, record)
 
 	if er.file != nil {
-		fmt.Fprintf(er.file, "[%s] table=%s batch=%d stage=batch err=%s\n", record.Timestamp.Format(time.RFC3339), tableName, batchNum, err)
+		fmt.Fprintf(er.file, "[%s] table=%s batch=%d stage=batch err=%s\n", now.Format(time.RFC3339), tableName, batchNum, err)
 	}
 }
 
@@ -1352,7 +1395,7 @@ func (er *ErrorRecorder) GetErrors() []ErrorRecord {
 func (er *ErrorRecorder) GetErrorCount() int {
 	er.mu.Lock()
 	defer er.mu.Unlock()
-	return len(er.errors)
+	return er.totalErrors
 }
 
 // Close 关闭错误记录器

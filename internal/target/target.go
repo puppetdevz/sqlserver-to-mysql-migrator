@@ -367,16 +367,30 @@ func ImportReported(ctx context.Context, db *sql.DB, dir, database, identity, co
 	if e != nil {
 		return e
 	}
-	if path == root || strings.HasPrefix(path, root+string(os.PathSeparator)) {
+	// Resolve both sides before comparing: a report parent (or the bundle
+	// itself) may be an alias through a symlink. The report file is new, so
+	// resolve its existing parent rather than the report path.
+	bundleRoot, e := filepath.EvalSymlinks(root)
+	if e != nil {
+		return e
+	}
+	reportParent, e := filepath.EvalSymlinks(filepath.Dir(path))
+	if e != nil {
+		return e
+	}
+	canonicalReport := filepath.Join(reportParent, filepath.Base(path))
+	if canonicalReport == bundleRoot || strings.HasPrefix(canonicalReport, bundleRoot+string(os.PathSeparator)) {
 		return errors.New("report must be outside sealed bundle")
 	}
-	if _, e = os.Lstat(path); e == nil {
+	if _, e = os.Lstat(canonicalReport); e == nil {
 		return errors.New("report already exists")
 	}
 	if !os.IsNotExist(e) {
 		return e
 	}
-	return importRun(ctx, db, dir, database, false, identity, confirmation, func(r Report) error { return saveReport(reportPath, r) })
+	// Use the resolved destination for every journal write as well: swapping
+	// the alias later must not redirect the report into the sealed bundle.
+	return importRun(ctx, db, dir, database, false, identity, confirmation, func(r Report) error { return saveReport(canonicalReport, r) })
 }
 func saveReport(path string, r Report) error {
 	b, e := json.MarshalIndent(r, "", "  ")

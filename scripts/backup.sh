@@ -11,6 +11,7 @@
 #   BACKUP_DIR - 备份目录（默认: 脚本所在目录）
 #
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
@@ -62,6 +63,21 @@ do_backup() {
             rm "$backup_file"
         fi
         die "备份失败，请检查数据库连接和权限"
+    fi
+
+    if [[ ! -s "$backup_file" ]]; then
+        rm -f "$backup_file"
+        die "备份结果为空，已取消备份"
+    fi
+    local checksum
+    checksum=$(sha256_file "$backup_file") || {
+        rm -f "$backup_file"
+        die "备份校验值计算失败，已取消备份"
+    }
+    local checksum_tmp="${backup_file}.sha256.tmp"
+    if ! printf '%s\n' "$checksum" > "$checksum_tmp" || ! mv "$checksum_tmp" "${backup_file}.sha256"; then
+        rm -f "$checksum_tmp" "$backup_file"
+        die "备份校验值写入失败，已取消备份"
     fi
 
     local duration=$(calc_duration "$start_time")

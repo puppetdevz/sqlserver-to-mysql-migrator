@@ -47,6 +47,15 @@ assert_not_contains() {
     fi
 }
 
+write_checksum() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$file" | cut -d ' ' -f 1 > "$file.sha256"
+    else
+        shasum -a 256 -- "$file" | cut -d ' ' -f 1 > "$file.sha256"
+    fi
+}
+
 single_backup_file() {
     local backup_dir="$1"
     local had_nullglob=0
@@ -77,6 +86,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "${FAKE_MYSQL_CALL_LOG:-}" ]]; then
+    printf 'called\n' >> "$FAKE_MYSQL_CALL_LOG"
+fi
 
 if [[ -n "$query" ]]; then
     if [[ -n "${FAKE_MYSQL_OBJECTS_FILE:-}" && -f "$FAKE_MYSQL_OBJECTS_FILE" ]]; then
@@ -127,6 +140,7 @@ test_backup_writes_clean_sql_file() {
     assert_equal "0" "$status" "backup should succeed" || return 1
     local backup_file
     backup_file="$(single_backup_file "$backup_dir")" || return 1
+    assert_file_exists "$backup_file.sha256" || return 1
     assert_contains "$backup_file" 'CREATE TABLE `sample`' || return 1
     assert_contains "$backup_file" 'INSERT INTO `sample` VALUES (1);' || return 1
     assert_not_contains "$backup_file" 'Warning: fake mysqldump stderr' || return 1
@@ -142,6 +156,7 @@ test_restore_imports_backup_into_empty_database() {
     mkdir -p "$backup_dir"
     : > "$objects_file"
     printf 'CREATE TABLE `sample` (`id` int);\n' > "$backup_dir/target_database_202601010101.sql"
+    write_checksum "$backup_dir/target_database_202601010101.sql"
 
     PATH="$FAKE_BIN:$PATH" \
     DB_PASS=secret \
@@ -169,6 +184,7 @@ test_restore_drops_schema_objects_before_importing_backup() {
     mkdir -p "$backup_dir"
     printf 'VIEW\told_view\nTABLE\told_table\nPROCEDURE\told_proc\nFUNCTION\told_func\nEVENT\told_event\n' > "$objects_file"
     printf 'CREATE TABLE `sample` (`id` int);\n' > "$backup_dir/target_database_202601010102.sql"
+    write_checksum "$backup_dir/target_database_202601010102.sql"
 
     PATH="$FAKE_BIN:$PATH" \
     DB_PASS=secret \
@@ -204,6 +220,55 @@ test_restore_reports_missing_timestamp_backup() {
     assert_contains "$stderr_file" '备份文件不存在' || return 1
 }
 
+test_restore_rejects_backup_without_checksum_before_drop() {
+    local backup_dir="$TEST_ROOT/restore-unverified"
+    local count_file="$TEST_ROOT/restore-unverified.count"
+    local call_log="$TEST_ROOT/restore-unverified.calls"
+    mkdir -p "$backup_dir"
+    printf 'CREATE TABLE `sample` (`id` int);\n' > "$backup_dir/target_database_202601010106.sql"
+
+    PATH="$FAKE_BIN:$PATH" DB_PASS=secret BACKUP_DIR="$backup_dir" \
+    FAKE_MYSQL_COUNT_FILE="$count_file" FAKE_MYSQL_INPUT_PREFIX="$TEST_ROOT/unverified.mysql" FAKE_MYSQL_CALL_LOG="$call_log" \
+    bash "$REPO_ROOT/scripts/restore.sh" --timestamp 202601010106 > /dev/null 2>&1
+    local status=$?
+    [[ $status -ne 0 ]] || fail "unverified backup must be rejected" || return 1
+    [[ ! -e "$call_log" ]] || fail "mysql was called before backup verification" || return 1
+}
+
+test_restore_rejects_empty_backup_before_drop() {
+    local backup_dir="$TEST_ROOT/restore-empty-backup"
+    local count_file="$TEST_ROOT/restore-empty-backup.count"
+    local call_log="$TEST_ROOT/restore-empty-backup.calls"
+    local stderr_file="$TEST_ROOT/restore-empty-backup.err"
+    mkdir -p "$backup_dir"
+    : > "$backup_dir/target_database_202601010104.sql"
+
+    PATH="$FAKE_BIN:$PATH" DB_PASS=secret BACKUP_DIR="$backup_dir" \
+    FAKE_MYSQL_COUNT_FILE="$count_file" FAKE_MYSQL_INPUT_PREFIX="$TEST_ROOT/empty-backup.mysql" FAKE_MYSQL_CALL_LOG="$call_log" \
+    bash "$REPO_ROOT/scripts/restore.sh" --timestamp 202601010104 > /dev/null 2> "$stderr_file"
+    local status=$?
+    [[ $status -ne 0 ]] || fail "empty backup must be rejected" || return 1
+    [[ ! -e "$call_log" ]] || fail "mysql was called before backup validation" || return 1
+}
+
+test_restore_rejects_tampered_backup_before_drop() {
+    local backup_dir="$TEST_ROOT/restore-tampered"
+    local count_file="$TEST_ROOT/restore-tampered.count"
+    local call_log="$TEST_ROOT/restore-tampered.calls"
+    local stderr_file="$TEST_ROOT/restore-tampered.err"
+    mkdir -p "$backup_dir"
+    local backup_file="$backup_dir/target_database_202601010105.sql"
+    printf 'CREATE TABLE `sample` (`id` int);\n' > "$backup_file"
+    printf '%064d\n' 0 > "$backup_file.sha256"
+
+    PATH="$FAKE_BIN:$PATH" DB_PASS=secret BACKUP_DIR="$backup_dir" \
+    FAKE_MYSQL_COUNT_FILE="$count_file" FAKE_MYSQL_INPUT_PREFIX="$TEST_ROOT/tampered.mysql" FAKE_MYSQL_CALL_LOG="$call_log" \
+    bash "$REPO_ROOT/scripts/restore.sh" --timestamp 202601010105 > /dev/null 2> "$stderr_file"
+    local status=$?
+    [[ $status -ne 0 ]] || fail "tampered backup must be rejected" || return 1
+    [[ ! -e "$call_log" ]] || fail "mysql was called before checksum validation" || return 1
+}
+
 run_test() {
     local name="$1"
     shift
@@ -222,6 +287,9 @@ main() {
     run_test "restore imports backup into empty database" test_restore_imports_backup_into_empty_database
     run_test "restore drops existing schema objects before import" test_restore_drops_schema_objects_before_importing_backup
     run_test "restore reports missing timestamp backup" test_restore_reports_missing_timestamp_backup
+    run_test "restore rejects unverified backup before deleting objects" test_restore_rejects_backup_without_checksum_before_drop
+    run_test "restore rejects empty backup before deleting objects" test_restore_rejects_empty_backup_before_drop
+    run_test "restore rejects tampered backup before deleting objects" test_restore_rejects_tampered_backup_before_drop
 
     if [[ $failures -gt 0 ]]; then
         echo "$failures test(s) failed" >&2

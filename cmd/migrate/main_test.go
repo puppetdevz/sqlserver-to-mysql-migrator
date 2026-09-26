@@ -513,7 +513,7 @@ func TestImportDataWithCSVMappingReturnsContextErrorBeforeDispatch(t *testing.T)
 	wantErr := errors.New("create table failed")
 	migrationCtx.Stop(wantErr)
 
-	err = importDataWithCSVMapping(cfg, nil, nil, []string{"ADDRESSBOOK"}, tracker, migrationCtx, matcher.NewTableNameMatcher(true))
+	err = importDataWithCSVMapping(cfg, nil, nil, []string{"ADDRESSBOOK"}, tracker, migrationCtx, matcher.NewTableNameMatcher(true), nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("importDataWithCSVMapping() error = %v, want %v", err, wantErr)
 	}

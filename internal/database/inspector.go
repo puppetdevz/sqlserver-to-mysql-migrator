@@ -74,7 +74,7 @@ func classifyTableNames(allTableNames, existingTables []string, tableMatcher mat
 
 // GetTableStructure 获取表结构信息
 func (i *Inspector) GetTableStructure(tableName string) ([]ColumnInfo, error) {
-	query := fmt.Sprintf("DESCRIBE `%s`", tableName)
+	query := fmt.Sprintf("DESCRIBE %s", matcher.QuoteIdent(tableName))
 	rows, err := i.conn.DB.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe table %s: %w", tableName, err)

@@ -180,7 +180,7 @@ func (ti *TableImporter) countRowsForProgress(file *os.File) (int64, error) {
 
 func (ti *TableImporter) getDBColumnInfos(ctx context.Context, tableName string) ([]dbColumnInfo, error) {
 	// 使用 DESCRIBE 获取列信息
-	query := fmt.Sprintf("DESCRIBE `%s`", tableName)
+	query := fmt.Sprintf("DESCRIBE %s", matcher.QuoteIdent(tableName))
 	rows, err := ti.conn.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err

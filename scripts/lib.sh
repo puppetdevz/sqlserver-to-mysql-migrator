@@ -99,6 +99,19 @@ backup_file_path() {
     echo "$BACKUP_DIR/${BACKUP_PREFIX}${ts}.sql"
 }
 
+# ========== 备份文件完整性 ==========
+sha256_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$file" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$file" | cut -d ' ' -f 1
+    else
+        echo_error "需要 sha256sum 或 shasum 来验证备份完整性"
+        return 1
+    fi
+}
+
 # ========== 执行 mysqldump ==========
 # 用法: run_mysqldump <output_file>
 run_mysqldump() {

@@ -72,6 +72,20 @@ find_backup_file() {
     return 0
 }
 
+# ========== 恢复前校验：必须在任何 MySQL 调用前完成 ==========
+validate_backup_file() {
+    [[ -f "$BACKUP_FILE" && -s "$BACKUP_FILE" && -r "$BACKUP_FILE" ]] || die "备份文件不存在、为空或不可读: $BACKUP_FILE"
+    local checksum_file="${BACKUP_FILE}.sha256"
+    [[ -f "$checksum_file" && -r "$checksum_file" ]] || die "缺少备份 SHA-256 校验文件: $checksum_file；旧备份需在离线验证后生成校验值"
+    local expected actual
+    [[ $(wc -l < "$checksum_file") -eq 1 ]] || die "备份校验文件格式无效: $checksum_file"
+    IFS= read -r expected < "$checksum_file" || die "无法读取备份校验文件: $checksum_file"
+    [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || die "备份校验文件格式无效: $checksum_file"
+    actual=$(sha256_file "$BACKUP_FILE") || die "无法计算备份 SHA-256: $BACKUP_FILE"
+    expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
+    [[ "$expected" == "$actual" ]] || die "备份 SHA-256 不匹配，禁止清空目标数据库: $BACKUP_FILE"
+}
+
 # ========== 前置检查 ==========
 check_prerequisites() {
     check_cmd mysql "请确保 MySQL 客户端已安装"
@@ -90,6 +104,7 @@ check_prerequisites() {
         fi
         echo_info "选择最新备份: $(basename "$BACKUP_FILE")"
     fi
+    validate_backup_file
 }
 
 # ========== 输出待删除对象 ==========

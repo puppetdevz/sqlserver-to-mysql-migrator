@@ -1,0 +1,50 @@
+name: Offline safety and publication checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.26.x' # latest maintained patch, not the old language minimum
+          check-latest: true
+          cache: false
+      - name: Verify pinned dependencies and license inventory
+        run: |
+          go mod download
+          go mod verify
+          python3 scripts/check_dependency_licenses.py
+      - name: Default tests, formatting and vet (no databases)
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go test ./... -count=1 -timeout=120s
+          go vet ./...
+          bash scripts/backup_restore_test.sh
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Audit public scope and all local history
+        run: python3 scripts/check_publication.py --history --snapshot "$RUNNER_TEMP/public-snapshot"
+      - name: Redacted secret scan and dependency vulnerability check
+        env:
+          GOBIN: ${{ runner.temp }}/security-tools
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.24.3
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$GOBIN/gitleaks" git --log-opts=--all --config .gitleaks.toml --redact=100 --no-banner
+          "$GOBIN/gitleaks" dir "$RUNNER_TEMP/public-snapshot" --config .gitleaks.toml --redact=100 --no-banner
+          "$GOBIN/govulncheck" ./...
+      - name: Compile Linux artifacts (never run migration)
+        run: ./scripts/build.sh linux

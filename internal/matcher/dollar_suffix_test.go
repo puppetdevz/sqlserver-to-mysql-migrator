@@ -9,9 +9,9 @@ func TestTableNameToCSVFileName(t *testing.T) {
 		want      string
 	}{
 		{"dollar table", "TABLE$", "TABLE"},
-		{"dollar table mixed case", "FORMMAIN$", "FORMMAIN"},
-		{"ordinary table unchanged", "SAMPLE_MAIN_102", "SAMPLE_MAIN_102"},
-		{"ordinary table simple", "AGENT", "AGENT"},
+		{"dollar table mixed case", "SampleItems$", "SampleItems"},
+		{"ordinary table unchanged", "SAMPLE_ITEMS", "SAMPLE_ITEMS"},
+		{"ordinary table simple", "SAMPLE_LOG", "SAMPLE_LOG"},
 		{"already no dollar", "CUSTOM_TABLE_NAME", "CUSTOM_TABLE_NAME"},
 	}
 
@@ -35,8 +35,8 @@ func TestCSVFileNameToTableName(t *testing.T) {
 		// timestamp 非空，$ 表
 		{"dollar table with timestamp", "TABLE__20000101000000.csv", "20000101000000", "TABLE$"},
 		// timestamp 非空，普通表
-		{"ordinary table with timestamp", "SAMPLE_MAIN_102_20000101000000.csv", "20000101000000", "SAMPLE_MAIN_102"},
-		{"simple table with timestamp", "AGENT_20000101000000.csv", "20000101000000", "AGENT"},
+		{"ordinary table with timestamp", "SAMPLE_ITEMS_20000101000000.csv", "20000101000000", "SAMPLE_ITEMS"},
+		{"simple table with timestamp", "SAMPLE_LOG_20000101000000.csv", "20000101000000", "SAMPLE_LOG"},
 		// timestamp 非空，无匹配后缀
 		{"no matching suffix", "TABLE_99999999999999.csv", "20000101000000", "TABLE_99999999999999"},
 		// timestamp 非空，文件名无 .csv

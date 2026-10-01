@@ -119,10 +119,7 @@ build_platform() {
 
     echo_step "开始构建 ${desc}..."
 
-    local output_name="migrate-${os}"
-    [[ "$os" == "darwin" ]] && output_name="sqlserver-to-mysql-migrator-darwin-arm64"
-    [[ "$os" == "linux" && "$arch" == "amd64" ]] && output_name="sqlserver-to-mysql-migrator-linux-amd64"
-    [[ "$os" == "linux" && "$arch" == "arm64" ]] && output_name="sqlserver-to-mysql-migrator-linux-arm64"
+    local output_name="sqlserver-to-mysql-migrator-${os}-${arch}"
 
     local binary="$DIST_DIR/$output_name"
 
@@ -147,7 +144,11 @@ build_platform() {
     strip "$binary" 2>/dev/null || true
 
     # SHA256 校验和
-    sha256sum "$binary" > "${binary}.sha256"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$binary" > "${binary}.sha256"
+    else
+        shasum -a 256 "$binary" > "${binary}.sha256"
+    fi
 
     local size=$(du -h "$binary" | cut -f1)
     local arch_info=$(file "$binary")
@@ -212,10 +213,9 @@ main() {
     echo "产物目录: $DIST_DIR"
     echo ""
     echo "使用方式:"
-    echo "  chmod +x dist/migrate-*"
-    echo "  ./dist/sqlserver-to-mysql-migrator-darwin-arm64 --config config.yaml   # macOS"
-    echo "  ./dist/sqlserver-to-mysql-migrator-linux-amd64 --config config.yaml   # Linux x86_64"
-    echo "  ./dist/sqlserver-to-mysql-migrator-linux-arm64 --config config.yaml    # Linux ARM64"
+    echo "  ./dist/sqlserver-to-mysql-migrator-darwin-arm64 --help   # macOS"
+    echo "  ./dist/sqlserver-to-mysql-migrator-linux-amd64 --help   # Linux x86_64"
+    echo "  ./dist/sqlserver-to-mysql-migrator-linux-arm64 --help   # Linux ARM64"
     echo "========================================"
 
     if [ ${#failed[@]} -gt 0 ]; then

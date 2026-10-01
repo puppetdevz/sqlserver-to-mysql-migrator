@@ -104,7 +104,7 @@ func runCLI() (exitCode int) {
 
 	// 显示版本信息
 	if *version {
-		fmt.Printf("db-migration version %s (%s)\n", Version, BuildLabel)
+		fmt.Printf("sqlserver-to-mysql-migrator version %s (%s)\n", Version, BuildLabel)
 		return 0
 	}
 

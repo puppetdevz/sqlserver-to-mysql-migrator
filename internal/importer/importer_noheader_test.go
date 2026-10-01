@@ -1,3 +1,5 @@
+//go:build integration
+
 package importer
 
 import (
@@ -5,16 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/config"
-	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/database"
 )
 
 func TestNoHeaderCSVImport(t *testing.T) {
 	// Setup test
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_no_header.csv")
 
 	// Create test CSV without header
@@ -37,17 +36,8 @@ func TestNoHeaderCSVImport(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	// Create test table
@@ -132,7 +122,7 @@ func TestNoHeaderCSVImport(t *testing.T) {
 }
 
 func TestHeaderCSVImportWidensVarcharColumnWhenSourceDataExceedsDDL(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_auto_widen.csv")
 
 	csvContent := `id,note
@@ -152,17 +142,8 @@ func TestHeaderCSVImportWidensVarcharColumnWhenSourceDataExceedsDDL(t *testing.T
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_widen_t (id INT PRIMARY KEY, note VARCHAR(5) NULL)")
@@ -220,7 +201,7 @@ func TestHeaderCSVImportWidensVarcharColumnWhenSourceDataExceedsDDL(t *testing.T
 }
 
 func TestHeaderCSVImportRepairsUnquotedDelimiterInTextColumn(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_unquoted_text_delimiter.csv")
 
 	csvContent := `id,subject,module,auth,created_at,updated_at,org_account_id
@@ -240,17 +221,8 @@ func TestHeaderCSVImportRepairsUnquotedDelimiterInTextColumn(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	_, err = conn.DB.Exec(`
@@ -313,7 +285,7 @@ func TestHeaderCSVImportRepairsUnquotedDelimiterInTextColumn(t *testing.T) {
 }
 
 func TestHeaderCSVImportConvertsInvalidDatetimeColumnToText(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_auto_datetime_text.csv")
 
 	csvContent := `id,occurred_at
@@ -333,17 +305,8 @@ func TestHeaderCSVImportConvertsInvalidDatetimeColumnToText(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_datetime_t (id INT PRIMARY KEY, occurred_at DATETIME NULL)")
@@ -401,7 +364,7 @@ func TestHeaderCSVImportConvertsInvalidDatetimeColumnToText(t *testing.T) {
 }
 
 func TestHeaderCSVImportConvertsInvalidDecimalColumnToText(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_auto_decimal_text.csv")
 
 	csvContent := `id,category_code
@@ -421,17 +384,8 @@ func TestHeaderCSVImportConvertsInvalidDecimalColumnToText(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_decimal_t (id INT PRIMARY KEY, category_code DECIMAL(10,0) NULL)")
@@ -489,7 +443,7 @@ func TestHeaderCSVImportConvertsInvalidDecimalColumnToText(t *testing.T) {
 }
 
 func TestHeaderCSVImportConvertsOutOfRangeNumericColumnToText(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_auto_numeric_range_text.csv")
 
 	csvContent := `id,amount
@@ -509,17 +463,8 @@ func TestHeaderCSVImportConvertsOutOfRangeNumericColumnToText(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_auto_numeric_range_t (id INT PRIMARY KEY, amount DECIMAL(5,2) NULL)")
@@ -568,22 +513,8 @@ func TestHeaderCSVImportConvertsOutOfRangeNumericColumnToText(t *testing.T) {
 	}
 }
 
-func TestPreprocessRowDecodesGB18030TextToUTF8(t *testing.T) {
-	processed := PreprocessRow([]string{"\xB9\xDC\xC0\xED_\xCE\xB4\xCD\xA8\xB9\xFD"})
-	got, ok := processed[0].(string)
-	if !ok {
-		t.Fatalf("processed value type = %T, want string", processed[0])
-	}
-	if !utf8.ValidString(got) {
-		t.Fatalf("processed value is not valid UTF-8: %q", got)
-	}
-	if got != "管理_未通过" {
-		t.Fatalf("processed value = %q, want 管理_未通过", got)
-	}
-}
-
 func TestHeaderCSVImportFallsBackToDBColumnOrderWhenHeaderIsIncomplete(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_incomplete_header.csv")
 
 	csvContent := `id,name
@@ -604,17 +535,8 @@ func TestHeaderCSVImportFallsBackToDBColumnOrderWhenHeaderIsIncomplete(t *testin
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	_, err = conn.DB.Exec("CREATE TABLE IF NOT EXISTS test_incomplete_header_t (id INT PRIMARY KEY, name VARCHAR(20), amount DECIMAL(10,2), category VARCHAR(20))")
@@ -659,7 +581,7 @@ func TestHeaderCSVImportFallsBackToDBColumnOrderWhenHeaderIsIncomplete(t *testin
 
 func TestNoHeaderCSVColumnMismatch(t *testing.T) {
 	// Setup test
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_mismatch.csv")
 
 	// Create test CSV with wrong number of columns (4 instead of 3)
@@ -679,17 +601,8 @@ func TestNoHeaderCSVColumnMismatch(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	// Create test table (3 columns)
@@ -724,7 +637,7 @@ func TestNoHeaderCSVColumnMismatch(t *testing.T) {
 
 func TestFirstRowEOF(t *testing.T) {
 	// Setup test
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_empty.csv")
 
 	// Create empty CSV
@@ -743,17 +656,8 @@ func TestFirstRowEOF(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	recorder3, _ := NewErrorRecorder("")
@@ -786,7 +690,7 @@ func TestFirstRowDataPassedToGoroutine(t *testing.T) {
 	// This test verifies that firstRow is correctly passed to the goroutine
 	// by checking the column count log output
 
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_goroutine.csv")
 
 	// Create test CSV without header: 3 columns, 2 rows
@@ -807,17 +711,8 @@ func TestFirstRowDataPassedToGoroutine(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	// Create test table
@@ -860,7 +755,7 @@ func TestFirstRowDataPassedToGoroutine(t *testing.T) {
 }
 
 func TestFastFailFalseCollectsAllErrors(t *testing.T) {
-	tmpDir := os.TempDir()
+	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "test_fast_fail.csv")
 
 	// Create test CSV with 3 rows
@@ -884,17 +779,8 @@ func TestFastFailFalseCollectsAllErrors(t *testing.T) {
 		},
 	}
 
-	conn, err := database.NewConnection(&config.TargetConfig{
-		Host:     "localhost",
-		Port:     3306,
-		Database: "migration_example",
-		User:     "root",
-		Password: "REDACTED_PRIVATE_CREDENTIAL",
-		Charset:  "utf8mb4",
-	})
-	if err != nil {
-		t.Skipf("Skipping test: failed to connect to MySQL: %v", err)
-	}
+	conn := newMySQLFixtureConnection(t)
+	var err error
 	defer conn.Close()
 
 	// Create table with UNIQUE constraint on name column

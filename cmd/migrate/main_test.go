@@ -398,9 +398,9 @@ func TestFinalizeCreateOnlyProgressMarksExistingTablesAsSkipped(t *testing.T) {
 func TestCollectDDLTableNamesUsesOriginalTableNameForCaseSensitiveMatching(t *testing.T) {
 	allDDLs := map[string]*parser.TableDDL{
 		"SAMPLE_MAIN_101$": {TableName: "sample_main_101$"},
-		"NIL_TABLE":      nil,
-		"ADDRESSBOOK":    {TableName: "ADDRESSBOOK"},
-		"AGENT":          {TableName: "agent"},
+		"NIL_TABLE":        nil,
+		"ADDRESSBOOK":      {TableName: "ADDRESSBOOK"},
+		"AGENT":            {TableName: "agent"},
 	}
 
 	tableNames := collectDDLTableNames(allDDLs)

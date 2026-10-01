@@ -16,7 +16,7 @@ TIMESTAMP_PATTERN='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
 # ========== 数据库配置 ==========
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-3306}"
-DB_NAME="${DB_NAME:-migration_example_mysql}"
+DB_NAME="${DB_NAME:-migration_example}"
 DB_USER="${DB_USER:-root}"
 DB_PASS="${DB_PASS:-}"  # 必须通过环境变量设置
 

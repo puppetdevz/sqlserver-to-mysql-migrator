@@ -26,7 +26,7 @@ parse_args() {
 
 示例:
   cd scripts && ./backup.sh
-  DB_PASS=xxx BACKUP_DIR=/path ./backup.sh
+  BACKUP_DIR=/private/backup ./backup.sh  # DB_PASS must already be securely injected
 EOF
                 exit 0
                 ;;

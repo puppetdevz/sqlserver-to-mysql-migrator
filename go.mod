@@ -18,5 +18,5 @@ require (
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.56.0 // indirect
 )

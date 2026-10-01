@@ -548,8 +548,5 @@ func maskPassword(pwd string) string {
 	if pwd == "" {
 		return "(empty)"
 	}
-	if len(pwd) <= 2 {
-		return "***"
-	}
-	return pwd[:2] + "***"
+	return "***"
 }

@@ -3,7 +3,7 @@ package matcher
 import "strings"
 
 // TableNameToCSVFileName 将表名转换为 CSV 文件名基础名（去掉 $ 后缀）
-// 例: TABLE$ → TABLE，SAMPLE_MAIN_102 → SAMPLE_MAIN_102
+// 例: TABLE$ → TABLE，SAMPLE_ITEMS → SAMPLE_ITEMS
 func TableNameToCSVFileName(tableName string) string {
 	if strings.HasSuffix(tableName, "$") {
 		return strings.TrimSuffix(tableName, "$")
@@ -14,7 +14,7 @@ func TableNameToCSVFileName(tableName string) string {
 // CSVFileNameToTableName 将 CSV 文件名转换为表名（处理 $ 后缀和 timestamp）
 // timestamp 为空时：TABLE__.csv → TABLE$
 // timestamp 非空时：TABLE__20000101000000.csv → TABLE$
-//              SAMPLE_MAIN_102_20000101000000.csv → SAMPLE_MAIN_102
+//              SAMPLE_ITEMS_20000101000000.csv → SAMPLE_ITEMS
 func CSVFileNameToTableName(fileName, timestamp string) string {
 	// 移除 .csv 后缀
 	name := strings.TrimSuffix(fileName, ".csv")

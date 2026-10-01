@@ -1,0 +1,8 @@
+title = "Public repository secret scan"
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Only the literal historical redaction placeholder, not arbitrary tests or paths"
+regexTarget = "secret"
+regexes = ['''^REDACTED_PRIVATE_CREDENTIAL$''']

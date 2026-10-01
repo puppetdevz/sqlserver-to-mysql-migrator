@@ -1,40 +1,54 @@
-# macOS
-.DS_Store
+# Private configuration and runtime inputs
+*.local.yaml
+*.local.yml
+.env
+.env.*
+!.env.example
+/scripts/local-db.env
+/data/
+/configs/private/
 
-# IDE
+# Database backups and migration state
+/scripts/*.sql
+/scripts/*.sql.sha256
+/backups/
+state.db*
+/completed_tables.txt
+/failed_tables.txt
+/create_failed_tables.txt
+/row_count_mismatch_tables.txt
+/slow_tables.txt
+/tables.txt
+
+# Logs, diagnostic reports and profiles
+/logs/
+*.log
+/diagnostics/
+/reports/
+*.pprof
+*.prof
+
+# Build and development residue
+/dist/
+/migrate
+/sqlserver-to-mysql-migrator
+/vendor/
+.go-cache/
+.codegraph/
+.agents/
+.claude/
+.reasonix/
+.vscode/
 .idea/
-*.swp
-*.swo
-*~
-
-# Go
+.DS_Store
+__pycache__/
+*.py[cod]
 *.exe
-*.exe~
 *.dll
 *.so
 *.dylib
 *.test
 *.out
-/vendor/
-
-# Build artifacts
-/dist/
-/migrate
-
-# Migration state (runtime generated)
-state.db
-state.db-journal
-state.db-wal
-state.db-shm
-
-# Logs
-logs/
-*.log
-
-# Data files (large, don't need version control)
-data/
-.go-cache
-.claude/worktrees/
-.reasonix/
-completed_tables.txt
-slow_tables.txt
+*.swp
+*.swo
+*~

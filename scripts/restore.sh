@@ -50,7 +50,7 @@ parse_args() {
   cd scripts && ./restore.sh
   ./restore.sh --timestamp 202604211830
   ./restore.sh --dry-run
-  DB_PASS=xxx BACKUP_DIR=/path ./restore.sh
+  BACKUP_DIR=/private/backup ./restore.sh  # DB_PASS must already be securely injected
 EOF
                 exit 0
                 ;;

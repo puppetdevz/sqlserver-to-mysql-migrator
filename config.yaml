@@ -1,0 +1,48 @@
+# Public template: review the target and backup before any write.
+# config.local.yaml overrides this file automatically; never commit it.
+source:
+  ddl_file: examples/schema.sql
+  csv_directory: examples/csv
+  csv_timestamp: ""
+  csv_has_header: true
+target:
+  host: 127.0.0.1
+  port: 3306
+  database: migration_example
+  user: migration_user
+  password: ""
+  charset: utf8mb4
+  max_open_conns: 10
+  max_idle_conns: 5
+  conn_max_lifetime: 3600
+  read_timeout: 30
+  write_timeout: 30
+migration:
+  table_name_case_sensitive: true
+  fast_fail: true
+  batch_size: 1000
+  max_workers: 4
+  on_duplicate: ignore
+  max_rows_per_table: 0
+  skip_tables: []
+  max_batch_bytes: 8388608
+  row_count_validation: true
+  count_csv_rows_before_import: true
+  adaptive_import:
+    enabled: true
+    import_tokens: 4
+    min_tokens: 1
+    large_table_mb: 1024
+    huge_table_mb: 5120
+    slow_batch_seconds: 10
+    recovery_window_seconds: 60
+logging:
+  level: INFO
+  file: logs/migration.{yyyy}.{MMdd}.{HHmm}.log
+  console: true
+  max_size: 100
+  max_backups: 3
+  max_age: 30
+converter:
+  max_varchar_to_text_columns: 10
+  max_nvarchar_to_text_columns: 10

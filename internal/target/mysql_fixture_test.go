@@ -1,3 +1,5 @@
+//go:build integration
+
 package target
 
 import (
@@ -17,8 +19,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/zhongyuming/sqlserver-to-mysql-migrator/internal/bundle"
 )
-
-func fixtureMatchesPort(addr, binding string) bool { return addr == strings.TrimSpace(binding) }
 
 // Optional disposable Docker MySQL protocol smoke test; NOT GoldenDB G1.
 func TestMySQLDockerOptionalBundleRoundTrip(t *testing.T) {

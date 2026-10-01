@@ -1,3 +1,5 @@
+//go:build integration
+
 package importer
 
 import (
@@ -9,34 +11,24 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// GoldenDB-specific behaviour is an explicitly gated, optional integration test.
-// It never falls back to the local/production config: when
-// GOLDENDB_TEST_DSN is unset the test skips, and when it is set the DSN must not
-// point at localhost, 127.0.0.1 or ::1. A separate authorized isolated target is
-// required. This test is intentionally excluded from the offline regression.
-//
-// Enable only after G1 authorization, inside the isolated environment:
-//
-//	GOLDENDB_TEST_DSN='user:pass@tcp(ISOLATED_HOST:3306)/ISOLATED_DB?parseTime=true' \
-//	  go test ./internal/importer -run TestGoldenDBOptionalIntegration -v
+// GoldenDB requires a separately authorized isolated fixture, verified TLS,
+// explicit environment opt-in and the integration build tag. It never reads
+// local configuration. This smoke test is not production compatibility proof.
 func TestGoldenDBOptionalIntegration(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("GOLDENDB_TEST_DSN"))
-	if dsn == "" {
+	if dsn == "" || os.Getenv("GOLDENDB_TEST_ISOLATED") != "1" {
 		t.Skip("GOLDENDB_TEST_DSN is not set; GoldenDB integration requires a separate authorized isolated target")
 	}
-	lower := strings.ToLower(dsn)
-	for _, forbidden := range []string{"tcp(localhost", "tcp(127.0.0.1", "tcp(::1", "tcp([::1]"} {
-		if strings.Contains(lower, forbidden) {
-			t.Fatalf("GOLDENDB_TEST_DSN must not fall back to a local target (%s)", forbidden)
-		}
+	if err := validateGoldenDBFixtureDSN(dsn); err != nil {
+		t.Fatal(err)
 	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("open isolated GoldenDB DSN: %v", err)
+		t.Fatal("cannot open isolated GoldenDB connection")
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		t.Fatalf("ping isolated GoldenDB: %v", err)
+		t.Fatal("cannot ping isolated GoldenDB fixture")
 	}
 
 	const table = "goldendb_optional_integration"

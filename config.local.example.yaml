@@ -1,0 +1,8 @@
+# Copy privately to config.local.yaml only when intentionally configuring this project.
+# Never commit real credentials. Prefer a least-privilege account.
+target:
+  host: 127.0.0.1
+  port: 3306
+  database: migration_example
+  user: migration_user
+  password: ""

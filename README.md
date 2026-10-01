@@ -137,4 +137,8 @@ python3 scripts/check_publication.py --history
 
 项目代码使用 [MIT](LICENSE)。外部依赖保留原许可，见 [依赖清单](docs/dependencies.md)、[第三方声明](THIRD_PARTY_NOTICES.md)及[补充声明](THIRD_PARTY_ADDITIONAL_NOTICES.md)。
 
-作者：**zhongyuming** · **puppetdevz@gmail.com**
+作者：**zhongyuming** · **puppetdevzz@gmail.com**
+
+## GitHub Star 变化曲线
+
+[![Star History Chart](https://api.star-history.com/svg?repos=puppetdevz/sqlserver-to-mysql-migrator&type=Date)](https://www.star-history.com/#puppetdevz/sqlserver-to-mysql-migrator&Date)

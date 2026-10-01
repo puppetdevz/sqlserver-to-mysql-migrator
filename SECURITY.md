@@ -2,7 +2,7 @@
 
 ## 非公开漏洞报告
 
-请发送邮件至 **puppetdevz@gmail.com**，主题建议为 `[security] sqlserver-to-mysql-migrator`。不要在公开 Issue/PR 中披露尚未处理的漏洞。
+请发送邮件至 **puppetdevzz@gmail.com**，主题建议为 `[security] sqlserver-to-mysql-migrator`。不要在公开 Issue/PR 中披露尚未处理的漏洞。
 
 请描述受影响提交/版本、最小合成复现、影响范围和可能的缓解措施。**不要发送实际数据库口令、连接串、客户数据、完整业务 DDL/CSV 或未脱敏日志。** 如有敏感证据，请先联系协商独立安全传递方式。没有承诺固定响应时限。
 

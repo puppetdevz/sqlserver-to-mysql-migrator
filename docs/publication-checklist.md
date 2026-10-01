@@ -18,7 +18,7 @@
 python3 scripts/check_publication.py --history
 # 首次公开前可核对当前单一作者历史；公开后不以此阻断合法贡献者/平台合并提交：
 python3 scripts/check_publication.py --history \
-  --expected-author-name zhongyuming --expected-author-email puppetdevz@gmail.com
+  --expected-author-name zhongyuming --expected-author-email puppetdevzz@gmail.com
 # 客户/组织标识清单必须保存在仓库外的私有 JSON 字符串数组中，不写入公开代码或 CI：
 python3 scripts/check_publication.py --history --forbidden-patterns /private/organization-policy.json
 # 导出时只复制审查范围内、非忽略的文件，不带 .git 或私有本地配置

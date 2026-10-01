@@ -11,7 +11,7 @@ from check_publication import audit, check_content, forbidden
 class PublicationAuditTests(unittest.TestCase):
     def repo(self, root):
         subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
-        for key, value in [("user.name", "zhongyuming"), ("user.email", "puppetdevz@gmail.com")]:
+        for key, value in [("user.name", "zhongyuming"), ("user.email", "puppetdevzz@gmail.com")]:
             subprocess.run(["git", "-C", str(root), "config", key, value], check=True)
 
     def test_restricted_paths_and_only_synthetic_example_sql(self):
@@ -62,7 +62,7 @@ class PublicationAuditTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(root), "commit", "-qm", "public contribution"], check=True)
             with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(audit(root, history=True), 0)
-                self.assertEqual(audit(root, history=True, expected_identity=("zhongyuming", "puppetdevz@gmail.com")), 1)
+                self.assertEqual(audit(root, history=True, expected_identity=("zhongyuming", "puppetdevzz@gmail.com")), 1)
 
     def test_deleted_private_file_in_history_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -39,4 +39,4 @@ Linux 使用 `./scripts/build.sh linux`。产物只在 `dist/`；具体名称见
 
 bundle 为 SNAPSHOT → 封存产物 → 未发布 staging，不自动切换业务表。需要显式表范围、验证证书的 TLS、目标计划确认和新报告路径。GoldenDB 精确版本/真实跨表快照/全量性能未现场验收。
 
-默认测试不连真实数据库；显式集成测试配置见 [docs/testing.md](docs/testing.md)。安全报告发往 **puppetdevz@gmail.com**，请勿附带实际凭据或业务数据。
+默认测试不连真实数据库；显式集成测试配置见 [docs/testing.md](docs/testing.md)。安全报告发往 **puppetdevzz@gmail.com**，请勿附带实际凭据或业务数据。
